@@ -15,12 +15,10 @@
 | 0 | `feat/0-foundation` | `core/` 地基 + mock/假固件 + 43 条自测 | `[REVIEW]` 待人类验收 |
 | 1 | `feat/1-wifi-check` | WiFi 信道体检 | `[REVIEW]` 待人类验收（mock 判据 + 真机实测均已通过） |
 | 2 | `feat/2-waterfall` | 频谱瀑布图（PNG + HTML 翻页） | `[REVIEW]` 待人类验收 |
-| 3 | `feat/3-ble-risk` | BLE 风险与环境评估 | `[REVIEW]` 待人类验收 |
-| 4 | `feat/4-guard-58g` | 5.8G 频段守卫 | `[TODO]` |
+| 3 | `feat/3-ble-risk` | BLE 风险与环境评估 | `[REVIEW]` 待人类验收（六档判词 + 仿真佐证 + 增益对照） |
+| 4 | `feat/4-guard-58g` | 5.8G 频段守卫 | `[REVIEW]` 待人类验收（13 窗滑扫 + 五类判词 + 告警日志 + 事件落库；真板空环境 1 条杂散 + 回放注入自证） |
 | 5 | `feat/5-capture` | 可疑信号抓拍（含分类器） | `[TODO]` |
-
-> 本分支（`feat/2-waterfall`）从阶段 0（`1f36a4e`）切出，是独立 worktree：
-> 阶段 1 的成果在 `feat/1-wifi-check`、上位机在 `feat/host-gui`，所以本文件里它们仍显示 `[TODO]`。
+| T | `feat/host-gui` | 图形上位机（WebView，跨阶段工具，不占功能阶段） | `[REVIEW]` 待人类验收（含双击弹出预览 + 高度自适应 + 真全屏 + 独立窗口 + 2D 瀑布频率轴 + 周期瀑布图页） |
 
 ---
 
@@ -127,7 +125,7 @@ BAND_5_HZ    = (5_170_000_000, 5_835_000_000)   # → 44 个窗：5180…5825，
 验收材料（`docs/02-waterfall.md` 有完整版）：
 
 ```bash
-python -m unittest discover -s tests -t .        # Ran 82 tests / OK
+python -m unittest discover -s tests -t .        # Ran 103 tests / OK（含 feat/host-gui 合并；纯本分支 82）
 python -m app.waterfall --minutes 10 --scenario microwave --db .data/wf/microwave.db --out .data/wf/microwave --ascii
 python -m app.waterfall --minutes 10 --scenario mixed     --db .data/wf/mixed.db     --out .data/wf/mixed     --ascii
 python -m app.waterfall --render-only --db .data/wf/mixed.db --out .data/wf/mixed   # 只重渲染
@@ -137,7 +135,7 @@ python -m app.waterfall --render-only --db .data/wf/mixed.db --out .data/wf/mixe
 
 | 验收项 | 判据 | 结果 |
 | --- | --- | --- |
-| 自测全绿 | `unittest` 0 失败 | ✅ 82 passed（新增 `test_png` 10 / `test_heatmap` 15 / `test_waterfall` 14） |
+| 自测全绿 | `unittest` 0 失败 | ✅ 103 passed（新增 `test_png` 10 / `test_heatmap` 15 / `test_waterfall` 20） |
 | 轮扫覆盖 | 三频段首尾压边、步进 ≤ 15 MHz、相邻窗重叠 | ✅ 2.4G 6 窗 / 5G LOW 13 / 5G HIGH 25，共 **44 窗一轮** |
 | 快照顺路入库 | 10 分钟 mock 入库帧数 == 生成帧数 | ✅ 5984 / 5984，`source_errors 0` |
 | 分页不丢帧 | 10 分钟 → 2 页，页帧数之和 == 总数 | ✅ 3036 + 2948 = 5984 |
@@ -146,6 +144,8 @@ python -m app.waterfall --render-only --db .data/wf/mixed.db --out .data/wf/mixe
 | WiFi 突发块 | 窄（< 30 MHz）+ 时间轴有暗行 | ✅ 2432–2442，min 22 / max 137 |
 | 无假信号 | `quiet` 不出现连续亮带 | ✅ `runs_above(p50+8)` 为空 |
 | 边界声明 | 「周期快照，非连续实时」+「相对码不是 dBm」 | ✅ PNG 页眉 / HTML banner / 页脚 / CLI 四处 |
+| **上位机真板联调**（合入 `feat/host-gui` 后） | 自检 29 项全绿 + 瀑布页真在滚动 | ✅ `--selftest --real --port COM56 --gain-index 60 --seconds 40` → 29/29、`rows 5 / sweeps 5 / painted 100%`、`share {waterfall 0.5, wifi_check 0.5}`、实测一轮 `12.4 s` |
+| 单射频公平配比 | 两个模块各拿一半射频 | ✅ `slice_weight` 都改 1.0；改前实测 share `{waterfall 0.016, wifi_check 0.984}`（瀑布一轮 5 分钟） |
 
 产物（`examples/esp32c5-rf-monitor/.data/wf/`，不入库）：
 
@@ -161,7 +161,13 @@ microwave/waterfall-p1.html 2.9 KB                 mixed/waterfall-p1.html 2.9 K
    真机数据同样进 `Store`，接口一致但**未实测**。
 2. **虚拟时间**：10 分钟数据 40~50 s 生成，时间轴是等效时间不是墙钟（产出物已注明）。
 3. **mock 逐 bin 抖动**：`SpectrumSynthesizer._is_on()` 按 bin 掷骰子，图上噪点感是 mock 特性。
-4. **上位机还没有瀑布图页**：`host/` 在 `feat/host-gui` 分支，本分支从阶段 0 切出无 `host/`。
+4. **上位机页已落地（已合并进 `feat/host-gui`）**：`host/web/pages/waterfall/`（注册表一行 + 片段 + `js/pages/waterfall.js`），
+   数据走本模块的 `web_payload()`（一行 = 一轮、一格一字节 base64、0 码 = 未扫到），
+   页上还能直接「生成 PNG + HTML」。真板 40 s 自检已验。
+5. **环形缓冲按「窗」存**（同窗连帧最大保持合并）：默认 1200 窗 ≈ 27 轮 ≈ 5 分钟；
+   按帧存时 1200 帧连一轮都装不下（真板一次 `scan()` 回 30+ 帧），页面只画得出一行半。
+6. **`row_period_s` 只用扫满的轮次估**：残轮会把周期算小（实测 1.8 s < 射频 4.4 s）；
+   凑不齐两整轮返回 0，前端退回射频时间。小时级历史仍走 `app/waterfall.py` 读 SQLite。
 
 ## [REVIEW] 3. BLE 风险与环境评估（feat/3-ble-risk）
 
@@ -183,16 +189,83 @@ microwave/waterfall-p1.html 2.9 KB                 mixed/waterfall-p1.html 2.9 K
 - [x] `python -m unittest discover -s tests -t .` → **76 条 OK**（43 地基 + 33 本功能）。
 - [x] 顺手修地基里两条「`modes/` 必须为空」的断言（与功能分支共存冲突，功能 1 分支同款修法）。
 
+**本轮（人类要求「用仿真佐证输出逻辑完备」）**：
+
+- [x] 判词从 4 档扩到 **6 档 + 2 过渡档**：`无明显风险` / `轻微干扰` / `复杂噪音（多源混合）` /
+      `蓝牙设备密度型` / `WiFi 压制型` / `宽带常开/形状疑似`（+ `混合型`、`无数据`）。
+      核心是**先判「分不分得清」再判「是哪一类」**，分不清就明说分不清，不许冒认 WiFi。
+- [x] 新增 4 条判据：`rise_floor`（本机噪声自己的抬升零点，实测标定；样本池含数据区 37 个栅格）、
+      `contrast_db`（抬升频点在时间上的开关幅度，p80；≥8 码才算信号）、
+      `shallow_ratio`（浅抬升占比，自成一档，需 ≥60 帧样本）、`slots_persistent`（常亮栅格 ⇒ CW 指纹）。
+- [x] **仿真佐证脚本** `tests/sim_ble_verdict.py`：用合成功率造 6 档输入，
+      五档现实输入 → **5 个互不相同的判词**（完全安静 / 浅干扰 / 复杂噪音 / 静态形状 / 开关型宽带），
+      病态输入（整段一起动）落到兜底「宽带常开/形状疑似」。跑法：
+      `python tests/sim_ble_verdict.py --scenarios`。
+- [x] 断言固化为 `DiscriminationTest`（7 条）→ `tests/test_ble_risk.py` 41 条，
+      全量 `discover` **145 条 OK**。
+- [x] 实板增益对照实验（同房间同脚本，只改增益）：
+      增益 20/40/60 → 宽带占用 **27% / 61% / 85%**，判词「复杂噪音 29.0」→「WiFi 压制型 40.7」→「WiFi 压制型 47.3」。
+      ⇒ 高增益下的宽带占用主要是**前端动态范围**，不能当环境真值；新增 `headroom_warning` 自动提示。
+- [x] 前端形状取证（24 帧 / 每桶 32 bin）：2442 MHz 窗是平滑「碗形」（两端高 14~27 码、中间 0 码），
+      时间抖动恒定 39–45 码、不随电平变化 ⇒ 是前端固有起伏，不是「13 个 WiFi 信道全在用」。
+
 **未验证 / 待人类确认**：
 
-- 没在**安静房间**复核实板（房间是活的，清不了场）；安静侧只有 mock `quiet` 佐证。
+- 没在**安静房间**复核实板（房间是活的，清不了场）；安静侧靠 mock `quiet`（4.9 / 0% / 0%）+
+  仿真六档守。
 - 本分支 `app/live.py` 还没有 `--gain-index`（属功能 1 分支），实板验证用了不提交的临时脚本。
+- **没有自动增益标定**：宽带占用随增益走这件事目前只出告警，不自动降增益复测（需人类定操作口径）。
 
-## [TODO] 4. 5.8G 频段守卫（feat/4-guard-58g）
+## [REVIEW] 4. 5.8G 频段守卫（feat/4-guard-58g）
 
-- 只加 `modes/guard_58g.py`。
-- 产出：5150–5850MHz 巡检、持续占用报警、事件入库（`store.add_event`）。
+- 产出：5700–5895 MHz 巡检、持续发射源告警、事件入库（`store.add_event`）。
 - 判据：`video_58g` 场景必须触发报警；`quiet` 场景必须不报警（误报率受控）。
+- 文件：`modes/guard_58g.py`、`tests/test_guard_58g.py`、`testing/guard_replay.py`、
+  `docs/04-guard-58g.md`、`app/__init__.py`（`bind_store`）、`app/demo.py`/`app/live.py`（各 3 行注入）。
+  未动 `core/`、未动其它模块。
+
+**频段口径修正（先说清楚）**：任务书写 5700–5900，todo 原写 5150–5850，**实际实现 5700–5895**：
+
+- 5895 是 C5 调谐上限（`docs/rx-controls.md`），5900 那段物理上测不到，写进去就是假数据；
+- 5150–5700 是 5G WiFi 低段，`wifi_check` 已经在管，守卫重复扫只是抢时间片。
+
+**已完成（数字都是实跑）**：
+
+- [x] 扫描计划 13 窗（20 MHz 窗 / 均分 14.58 MHz 步进 / 首尾压边），每窗 40 帧环形缓冲。
+- [x] 判据五条：时间均值抬升 ≥10 码、单帧占空比 ≥20%（≥75% 记「持续」）、连续 ≥8 帧、
+      段宽 100 kHz–16 MHz、交替跳频判互斥（相关系数 ≤ -0.4）。
+- [x] 五类判词：`持续窄带` / `持续宽带` / `规律跳频` / `持续单频点` / `间歇单频点`
+      （单频点 = ≤0.5 MHz，实板环境里是本振/时钟杂散，与图传分开报）。
+- [x] 告警日志：`G58-NNN` / 在发-已停 / 类型 / 频点 / 带宽 / 峰值抬升 / 占空比 / 持续时长 / 首次出现。
+- [x] 存活判定按**最新帧时间**（最近 60 s 无新帧 → 已停），不按墙钟也不按分析次数。
+- [x] 跨窗聚类（中心 6 MHz 内合并）：重叠窗重复看到的同一个源只留 1 条（13 条 → 1 条）。
+- [x] 事件落库：`app/__init__.py:bind_store()` 注入 store，首次出现写 1 条 `events`，续时长不重复写；
+      真板 45 s 跑出 `事件：guard_58g 1 条`，`events` 表 payload 带 id/kind/center_hz/bw_mhz。
+- [x] **实板 COM56 增益 60 / 45 s**：245 时间片 / 本模块 3682 帧 / 源错误 0；
+      空环境仅 1 条 `持续单频点 5776.1 MHz / 0.2 MHz / 88%`（本振杂散）。
+- [x] **误报根因两轮排查**（`docs/04-guard-58g.md` §5）：
+      ① 第一版 13 条假「持续窄带」，频点逐个等于窗中心 ⇒ 窗中心 ±250 kHz 是本机直流/LO 泄漏，挖掉；
+      ② 剩两根 0.1 MHz 凸起，两侧一格就掉回底噪 ⇒ 新增「单频点」类别而不是抬门限。
+- [x] **回放注入自证**（`testing/guard_replay.py`，真板数据 + 合成信号）：
+      5795/4 MHz/+25 → 抓到 4.0 MHz / 96% / 持续 9.4 s；5720/8 MHz/+20 → 8.0 MHz；
+      5830/2 MHz/+12 → 抓到但宽度低估成 0.9 MHz；5880/4 MHz/+8 → **按设计漏报**（低于 10 码门槛）。
+- [x] `python -m unittest tests.test_guard_58g -v` → **41 条 OK**；
+      `python -m unittest discover -s tests -t .` → **186 条 OK**。
+- [x] `python -m app.demo --duration 14` mock 全链路：3 条告警 + 3 条事件落库 + 判据原文打印。
+
+**边界（产出物与文档里都写了）**：
+
+- 周期快照非连续实时：一轮 13 窗 ≈ 1.3 s（真板约 3~4 s），「持续」是按采样到的帧算的。
+- 功率码是相对 dB 码，不是 dBm；增益会改占用率读数，跨会话比较先固定档位。
+- 5895–5925 MHz 测不到（芯片上限）；跨窗跳频不追（只判同窗内交替）；不做设备归因。
+- 弱信号下宽度会低估（+12 码时 2 MHz 报成 0.9 MHz）。
+- 窗中心 ±250 kHz 与窗沿 ±0.5 MHz 不判（直流泄漏 / 滚降），代价是正落中心的源抓不到。
+
+**未验证 / 待人类确认**：
+
+- **没有真实 5.8G 图传**做正样本：抓得到靠回放注入自证，实物信号等有条件再补一条实测。
+- 空环境只有 1 条杂散作误报基线，没在**多房间/多时段**复测误报率。
+- 5.8G 频段守卫暂无专属 GUI 页面：告警表已能在上位机「原始输出」页（`pages/raw/`）看到。
 
 ## [TODO] 5. 可疑信号抓拍（feat/5-capture）
 
@@ -200,6 +273,116 @@ microwave/waterfall-p1.html 2.9 KB                 mixed/waterfall-p1.html 2.9 K
 - 产出：按启发式分类（窄带连续/宽带突发/跳频样）触发 `CAP16`/`CAP20` 抓档，
   落盘原始 I/Q + 元数据 + 分类结论。
 - 判据：`unknown_cw` 场景触发抓档且分类为「窄带持续」；`quiet` 场景不抓。
+
+## [REVIEW] T. 图形上位机 / WebView（feat/host-gui）
+
+人类需求原文：「做一个测试上位机，参考 `MagicRobot_V0.1/host` 用 webview 3D 引擎，
+以后换别的实验只需要换网页」。
+
+上位机**可以脱离仓库独立运行**：项目根 `E:\_00AE_PROJECR\esp32c5_sdr_app\host\` 是工作副本，
+靠 `host/paths.py` 定位分析层（`ESPSDR_SRC` 环境变量 > `host/src` 自包含副本 > 向上 4 层找
+`repo/examples/esp32c5-rf-monitor`）。`ESPSDR_SRC` 一旦设了就是权威值，指错立刻抛错不静默回退。
+
+交付物：
+
+- `host/app.py`：`QWebEngineView` + `QWebChannel` 桥（所有 Python→JS 信号都是 JSON 字符串）
+  + `QThread` 采集线程（频谱 20fps / 表格 1s / 单片 0.35s）
+- `host/session.py`：纯 Python 逻辑层（无 Qt）：`HostConfig` 校验、`HostSession`
+  `open/step/spectrum/tables/render_text`、`downsample_bins`（按桶取最大值，保窄带峰）
+- `host/web/`：`index.html` + 路由 + 四个页面（实时频谱 / 周期瀑布图 / WiFi 体检 / 原始输出）+
+  本地 three.js r128（离线可用）
+- 周期瀑布图页（`web/pages/waterfall/` + `js/pages/waterfall.js`）：三频段并排的时频热力图，
+  一行 = 一轮完整轮扫、一格一字节、0 码画最暗色；鼠标读频率/功率码；按钮走
+  `Bridge.renderWaterfall()` → `produce(force=True)` 在 `.data/waterfall/` 出 PNG + HTML 翻页，
+  `Bridge.openFile()` 只在 `.data/` 内允许打开（越界直接拒）。
+  `--selftest` 新增 `waterfall_rows/painted/cards/banner/notes/sweep/render/share` 等。
+- **增益调控（本轮新增，`host/gain.py`）**：顶栏 `AGC | 手动 | 自动` 三段按钮 +
+  `− 档号 +` 步进 + `目标` 输入框 + `档 N · 实测 M · 底噪 X 码` 读数 + 自动调整次数。
+  `GainControl`（GUI 线程只写意图）+ `GainAwareSource`（`scan()` 开头落地命令、轮末结算）。
+  档位范围问固件 `GAIN?`（实板 0..81），不写死。
+- **BLE 风险评估页（本轮新增，`web/pages/ble/` + `js/pages/ble.js`）**：告警条 + 5 张判定卡 +
+  6 行证据链 + 9 列广播信道表 + 3D 信道柱 + 2.4G 在用信道 + `hints`/`notes` 原文 + payload 存底。
+  门槛全部来自 `payload.thresholds`，前端零硬编码判据。
+- `host/web/js/i18n.js` 补 `gain.*`（2 语言 × 10 键）与整页 `ble.*`（约 40 键 × 2 语言）。
+- `host/paths.py`：定位分析层（`ESPSDR_SRC` 权威值 > `host/src` > 向上 4 层）
+- `host/web/js/i18n.js` + `--lang zh|en`：外壳文案中英切换（模块自产表格沿用模块语言）
+- `host/web/js/scanbar.js`：扫频进度条（频段地图 + 回卷游标，数据来自 `info.plans`）
+- `host/web/js/popout.js`：**双击任意面板弹出预览**（铺满窗口 / 75%…300% 自定义缩放 /
+  真全屏 / **独立窗口**（`window.open` → `ConsolePage.createWindow`，可拖到别的显示器、
+  小窗口自己全屏）/ Esc 关闭，原地搬 DOM 不重建 canvas，缩放按新尺寸重画）
+- **弹出后高度自适应**：`--fit-grow` 两阶段量高度（余量 ÷ 标了 `data-fit-grow="1"`
+  的画布个数），`U.fitCanvas()` 高度 = `cssHeight × fitScale + fitGrow()`，
+  3D 容器 = `calc(300px * var(--fit-scale,1) + var(--fit-grow,0px))`
+- `host/web/js/pages/spectrum.js`：2D 瀑布底部**简易频率轴**（轴线 + 5 刻度 + MHz + 中心标亮）
+- `host/tests/test_session.py`：23 条无窗口自测
+- `host/README.md`：跑法、数据契约、**新增实验页的四步**、边界、踩坑表
+
+验收标准 → 结果：
+
+| 验收项 | 判据 | 结果 |
+| --- | --- | --- |
+| 逻辑层自测 | `cd host && python -m unittest discover -s tests -t tests` 0 失败 | ✅ 23 passed |
+| 增益逻辑自测 | `cd host && python tests/test_gain.py` 0 失败 | ✅ **32 passed**（含闭环热身/死区/确认/边界/退化帧/属性透传） |
+| 无人工自检（假固件） | `python app.py --selftest --seconds 8 --shot out.png` 退出码 0 | ✅ 退出码 0，**40/40 checks**（连跑 2 次稳定） |
+| 频谱页真的在画 | 收到帧 > 0 且 2D/3D 画布非黑比例 > 1% | ✅ 188 帧；spec 24.7% / 3D 10.1% / 2D 瀑布 11.6% |
+| **2D 瀑布真的在滚** | 缓冲行数 240；`paintedRows ≥ 10`、`distinctRows ≥ 0.9×frames`、顶部均值 > 底部 + 100 | ✅ `paintedRows 35 / frames 35 / distinctRows 32 / topMean 291 / bottomMean 33` |
+| **扫频进度条：分段** | 从 `info.plans` 自动切段，至少 2 段、总窗数 > 10 | ✅ `2.4G`（2402–2482，5 窗）+ `5G`（5170–5835，44 窗）= 49 窗 |
+| **扫频进度条：游标** | 游标在轨道内、已走过 ≥ 3 个窗 | ✅ `index 44 / visited 18 / x 1043 ≤ 1208`；像素实测琥珀色游标列 `1172 → 1673 → 343（回卷）→ 938` |
+| **扫频进度条：回卷** | 喂到最后一窗再喂第一窗：轮次 +1、本轮覆盖清零 | ✅ `passesAfterWrap 2 / visitedAfterWrap 1 / indexAtEnd 3` |
+| **中英切换** | 切 `en` 后导航、状态栏、扫频条文案都变；`level` 数据值仍走显示层翻译 | ✅ `navLabels` 含 `Live spectrum`；`shell = ["Scan progress (band map)", "now 5180 MHz · window 6/49 · pass 2", "Heavy"]` |
+| **2D 瀑布有频率轴** | 5 个刻度、升序、`lo < 中线 < hi` | ✅ 探针 `wf2dAxis {lo 5710, hi 5730, center 5720, ticks [5710,5715,5720,5725,5730]}`；像素带实测 H-30 处整行 2114 px 轴线 + 5 处标签笔画 |
+| **双击弹出预览（开）** | 浮层出现、面板搬进浮层、画布宽度 > 0 | ✅ `open {overlay true, inOverlay true, width 1391}` |
+| **双击弹出预览（缩放）** | 150% 后画布宽度 > 1.35× 原宽 | ✅ `zoom {1.5, width 2099} = 1.51×`，`--fit-scale 1.5` |
+| **双击弹出预览（关）** | 关闭后浮层不可见、面板回到页面原位 | ✅ `close {overlay false, hidden true, backHome true}` |
+| **换页也能弹** | WiFi 页不写代码也能弹（通用逻辑 + ⤢ 按钮） | ✅ `popoutAny {ok true, themed true, back true}` |
+| **弹出后高度自适应** | 面板高度 ≥ 浮层高度 90%，画布比 100% 时高 1.3 倍以上 | ✅ `stageH 865 / panelH 825`（95%），画布 `210 → 776`，`--fit-grow 461px` |
+| **全屏是真的全屏** | `win.isFullScreen()` 为真，且全屏下面板仍吃满高度 | ✅ `full true`；`stageH 1032 / panelH 993`（96%），`--fit-grow 629`，按钮变「退出全屏」 |
+| **窗口外弹窗** | 新开一个独立窗口，里面只有那块面板、画布按窗口尺寸渲染 | ✅ `popout_window {solo true, panel true, key spectrum:1, windows 1}`；`spec-canvas 1463×858`；截图存活 |
+| **独立窗口自己全屏** | 在小窗口里点全屏 → 小窗口全屏、主窗口不动 | ✅ 探针：`child_full true / main_full false`，`innerW 1707 × innerH 1067`，面板 1008 高，退出后 `false` |
+| WiFi 页真的在判 | 表格行 > 5、推荐信道有值、说明 ≥ 3 条 | ✅ 38 行；推荐 ch11 +17dB 拥挤；4 条说明 |
+| 原始页真的在输出 | 至少 1 个模块面板 + ASCII 文本 > 40 字符 | ✅ 1 面板 / 1 表 / 4364 字符 |
+| 换实验不改 Python | 新页面只加 `web/pages/<id>/page.html` + `registry.json` 一行 | ✅ 三页共用同一个 `app.py`，`router.js` 不认具体页名 |
+| 独立目录 | 上位机放项目根 `host/`，不依赖 `repo/` 的相对位置 | ✅ `paths.find_source()` 解析到 `…
+epo\examples\esp32c5-rf-monitor`；`ESPSDR_SRC=/tmp` 正确抛错 |
+| 真板可跑 | `--selftest --real --port COM56` 退出码 0 | ✅ 40 s → **29/29 checks 全绿**（598 频谱帧）；瀑布页 `rows 5 / sweeps 5 / painted 100%`、`share {waterfall 0.5, wifi_check 0.5}`、实测一轮 `12.4 s`；弹出 `open 1391 → 2099 → 关闭复位`；全屏 `1032/993`；独立窗口 `spec-canvas 1463×858` |
+| 边界一致 | 界面上「功率码不是 dBm」「周期快照」「固定增益才可比」 | ✅ 纵轴/提示/说明页脚都写了 |
+| **单射频配比公平** | 两个模块各拿一半射频（`share` 各 ≈0.5） | ✅ 两边 `slice_weight=1.0`；改前实测 `{waterfall 0.016, wifi_check 0.984}`（瀑布一轮被拉成 5 分钟） |
+| **进度条只跟一个计划** | 多模块同跑时不因换计划把 `visited` 清零 | ✅ `planModule` 固定；真板 40 s 探针 `visited 15 / passes 1` |
+| **重叠窗不误判换轮** | 「索引变小」加幅度门槛（跳回大半张图才算换轮） | ✅ `scanbar.js` 用 `index - found > plan.length/2` |
+| **进度条跟最宽计划** | 多计划并存时 5G 整段不能消失 | ✅ 假固件 `scanbar {groups 3, windows 44, visited 13}`；修前跟 `ble_risk` 只剩 2.4G 8 窗、`visited 5` |
+| **BLE 页真的在判** | 表格 ≥3 行、判词非空、证据链 ≥6 行、hints ≥1、notes ≥3、3D 有柱 | ✅ `rows 3 / risk WiFi 压制型 / evidence 6 / hints 3 / notes 8 / bars3d true` |
+| **增益：手动生效（真板）** | 档位回读一致 + 底噪随档位变 | ✅ `GAIN?` 回 `GAIN MANUAL 60 0 81 1`；0→81 逐档实测底噪 `0.0 … 63.0` 码（跨度 63），峰值 `46 → 133` |
+| **增益：自动闭环（真板）** | 起始 60 → 向目标 8 码收敛 | ✅ 14 轮 `60→58→56→54→52→50→48`，平滑底噪 `39.0→14.4`，每 2 轮一档 |
+| **增益：界面三项自检** | 手动/`+`/自动 三个动作都改到后端状态 | ✅ `gain_manual`/`gain_step`(+1)/`gain_auto`(`AUTO`)/`gain_on_button`(`["AUTO"]`)/`gain_readback`(含「底噪」) |
+
+未覆盖（必须诚实标注）：
+
+- **只在 Windows + Qt 6.12 上验过**；Linux/macOS 没测。
+- 「独立窗口」是**同一进程**里的第二个 `QWebEngineView`（共用同一个 `Bridge`），
+  不是新进程；主窗口退出时一起关闭，不能单独留一个小窗口活着。
+- 独立窗口的 `?solo=<页面:序号>` 里的序号是**面板在页面里的出现顺序**，页面动态
+  插拔面板后序号会变——只影响「已开着的旧窗口」重载，重新打开就好。
+- 全屏靠 Python 侧 `showFullScreen()`（合成点击没有用户手势，DOM Fullscreen 会被拒）；
+  只有纯浏览器打开网页时才会退化成 `popout--max`（铺满窗口）。
+- 3D 视图**没有自动对比度/色标校准**，只是同一色带映射；不做定量判读。
+- 页面刷新率受采集线程节流（20fps），**不是**固件原始帧率。
+- **自动增益闭环是主机侧**（改档位 → 等一轮 → 再量），不是固件内环；一轮 1~12 s，
+  环境突变时它要几轮才跟上。固件侧自动标定**没做**（需人类裁决）。
+- 自动闭环的目标是「底噪参考码」，**不是**「信号最强」：弱信号环境里它会让底噪贴目标，
+  强信号可能因此变糊——要测弱信号请用 `HARDWARE` 或手动钉高档。
+- BLE 页的「硬冲突」判据是 `overlap.fraction >= 0.9` 的**几何重叠**，不是实测同频打架。
+- 扫频进度条的**段名**（2.4G / 5G）是前端按频率猜的纯装饰标签，判据全部来自
+  `info.plans`；游标位置只反映「正在读哪个窗」，不表示覆盖质量。
+- 弹出预览的**「全屏」按钮**走浏览器 Fullscreen API，QWebEngine 默认不 accept，
+  失败时退回「铺满窗口」（同一层浮层），行为一致但不会真的占满显示器。
+- 缩放上限 300%：再大只是滚动，不会提升信息量（画布是按容器尺寸重渲染的，不是放大位图）。
+- 真机实测扫速 ≈ **4 窗/秒**（瓶颈是串口解析 1024 点，不是 100ms 驻留），一轮 49 窗约 12s；
+  假固件补节奏后 ≈ 8–10 窗/秒。
+
+遗留（可选优化）：
+
+- `wifi` 页每次表格刷新都重建 38 行 DOM（1 Hz，实测无卡顿）；若以后行数上千要改 diff 渲染。
+- 3D 柱状图每次刷新重建 mesh（≤38 个），切页时未复用；暂时够用。
 
 ## 阻塞与需求
 
@@ -209,8 +392,19 @@ microwave/waterfall-p1.html 2.9 KB                 mixed/waterfall-p1.html 2.9 K
   的失败重试/退避逻辑（或允许加"连续 N 次失败即停止本轮"的保护）。
 - ~~5G 宽窗归属口径~~：已由人类裁决「可以窄、多次移动扫描、允许重叠」→ 本轮落实为
   20MHz 窗 / 15MHz 步进重叠滑扫 + 覆盖率掩码，**已解除**。
-- **固定增益档位的产品化口径**：当前靠人工给 `--gain-index 60`。要不要做自动标定
-  （逐档试扫、挑不饱和的最高档）需要人类定，属于应用层（不碰 `core/`）。
+> 补充（任务 2 视角）：瀑布图不依赖上述两项修复，mock 与真机（`app.live`）都能出图。
+
+- **上位机瀑布图页嵌不嵌**：已按人类「烧录了就做上位机给我」需求在 `feat/host-gui` 落地（`web/pages/waterfall/`），
+  本源实现 `modes/waterfall.py:web_payload()`；不需要再等裁决。
+
+- **固定增益档位的产品化口径**：当前靠人工给 `--gain-index 60`，上位机已给**主机侧**
+  自动闭环（`--gain-mode AUTO`）。固件侧自动标定（逐档试扫、挑不饱和的最高档）仍然
+  **需要人类裁决**，属于固件/应用层（不碰 `core/`）。
+- **阶段 4 正样本缺口**（需要实物才能闭合）：没有真实 5.8G 图传/模拟摄像头，
+  抓得到只能靠 `testing/guard_replay.py` 往真板数据里注入信号自证；
+  有实物（哪怕一个 5.8G 无线摄像头）时可补一条真信号实测，把「抓到」从注入证据升级为实物证据。
+- **阶段 4/5 是否放行**：阶段 4 `feat/4-guard-58g` 已交 `[REVIEW]` 材料、阶段 5 `feat/5-capture` 仍是 `[TODO]`；
+  按 docx 的硬 STOP 规则应等人类「确认完成」阶段 0~3 后再开工。
 
 ## 约定
 

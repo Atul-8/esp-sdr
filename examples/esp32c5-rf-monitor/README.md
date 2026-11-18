@@ -19,13 +19,17 @@ examples/esp32c5-rf-monitor/
 │   ├── registry.py       #   ModePlugin 契约 + modes/ 自动发现
 │   └── classifier.py     #   启发式分类器接口（任务 5 才实现）
 ├── modes/                # 五个功能各占一个文件（功能分支各自添加）
-│   └── waterfall.py      #   任务 2：三频段轮扫 + 环形缓冲 + produce()（本分支）
+│   ├── wifi_check.py     #   任务 1：WiFi 信道体检（20 MHz 窗 / 15 MHz 步进重叠滑扫）
+│   ├── waterfall.py      #   任务 2：三频段轮扫 + 环形缓冲 + produce()
+│   ├── ble_risk.py       #   任务 3：BLE 广播信道风险评估（六档判词 + 证据链）
+│   └── guard_58g.py      #   任务 4：5.8G 频段守卫（持续发射源 + 告警日志 + 落事件）
 ├── output/               # 输出基础件（表格/单位格式化），各功能再自带实现
 │   ├── format.py         #   表格/单位格式化
 │   ├── png.py            #   零依赖 PNG 编码器 + 5×7 点阵（任务 2）
 │   └── heatmap.py        #   时频热力图 PNG + HTML 翻页（任务 2）
-├── tests/                # mock 快照源 + 假固件 + 无硬件自测（本分支 82 条）
+├── tests/                # mock 快照源 + 假固件 + 无硬件自测
 ├── app/                  # demo（mock 全链路）/ live（真机·假固件）/ waterfall（瀑布图 CLI）
+├── host/                 # 图形上位机（PySide6 + WebView）：换实验只换网页
 ├── docs/                 # 阶段说明、任务书副本、验收记录
 └── todo.md               # 唯一任务事实源
 ```
@@ -40,6 +44,12 @@ python -m app.demo --scenario ble_crowded  # 场景清单见 tests/mock_source.p
 python -m app.demo --weights "wifi_check:40,ble_risk:30,guard_58g:20,capture:10"
 python -m unittest discover -s tests -t . -v    # 全量自测
 
+# 任务 4：5.8G 频段守卫（持续发射源 + 告警日志）
+python -m app.demo --scenario video_58g --duration 14   # mock：5728–5752 宽带块 + 5740 载波 + 弱 WiFi
+#   产出：[alert] 表格（编号/类型/频点/带宽/抬升/占空比/持续时长）+ 判据原文
+#   真板：python -m app.live --port COM56 --duration 45 --gain-index 60 --db .data/guard.db
+python testing/guard_replay.py --db .data/guard.db      # 回放注入自证：往真板数据里塞一个图传
+
 # 任务 2：周期性频谱瀑布图（10 分钟等效 mock 数据 → PNG + HTML 翻页）
 python -m app.waterfall --minutes 10 --scenario mixed --ascii
 #   产物：.data/waterfall/index.html + waterfall-pN.png/html
@@ -48,12 +58,27 @@ python -m app.waterfall --minutes 10 --scenario mixed --ascii
 
 `python -m app.demo --help` 有全部参数；产物落在 `.data/`（已被 gitignore）。
 
+## 图形上位机（WebView 版）
+
+除了命令行，还有一套**网页界面**的上位机（Python 只做串口/调度/打包 JSON，
+界面全在 `host/web/`，换实验只换网页不用改 Python）：
+
+```sh
+python host/app.py --mock --scenario wifi_busy          # 没板也能看
+python host/app.py --port COM56 --gain-index 60          # 真板
+python host/app.py --selftest --seconds 8 --shot out.png # 自动自检（退出码 0/2）
+```
+
+四个页面：实时频谱（2D 曲线 + 3D 瀑布 + 2D 瀑布）、周期瀑布图（全频段时频
+热力图 + 一键出 PNG/HTML）、WiFi 信道体检（排序表 + 3D 柱状图 + 推荐）、
+原始输出（任意模块表格兜底 + CLI 同款 ASCII）。
+细节与「怎么加新实验页」见 `host/README.md`。
+
 ## 接真机
 
 ```sh
 pip install pyserial
-python -m app.live --port COM5 --duration 60 --gain-index 60  # Windows（固定增益才有可比性）
-python -m app.live --port /dev/ttyACM0 --duration 60 --gain-index 60
+python -m app.live --port COM5 --duration 60 --gain-index 60  # Windows（固定增益才有可比性）python -m app.live --port /dev/ttyACM0 --duration 60 --gain-index 60
 python -m app.live --mock --duration 5                # 同一条代码路径的假固件版
 ```
 

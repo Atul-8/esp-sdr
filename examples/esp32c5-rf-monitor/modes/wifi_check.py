@@ -152,7 +152,9 @@ class WifiCheck(ModePlugin):
 
     id: str = "wifi_check"
     name: str = "WiFi 信道体检"
-    slice_weight: float = 40.0
+    # 射频时间份额：单射频分时，本模块与 waterfall 各占一半（40.0 会把瀑布图饿死：
+    # 实测 share 0.984 vs 0.016，一轮 44 窗要 5 分钟才扫完）
+    slice_weight: float = 1.0
 
     dwell_ms: int = 100
     bins: int = 1024
@@ -339,6 +341,26 @@ class WifiCheck(ModePlugin):
             "frames": self.frames,
             "span_s": round(self.span_s, 2),
         }
+
+    def web_payload(self) -> dict[str, Any]:
+        """给上位机（``host/web``）的结构化产出：表格由前端自己画，这里只给数。"""
+        data = self.channel_report()
+        data.update(
+            {
+                "kind": "wifi_check",
+                "avoided": {"2.4G": self.avoided("2.4G"), "5G": self.avoided("5G")},
+                "dropped_frames": self.dropped_frames,
+                "levels": [{"min_db": threshold, "label": label} for threshold, label in LEVELS],
+                "non_overlap_24": list(NON_OVERLAP_24),
+                "scan_plan": {
+                    "bw_hz": SCAN_BW_HZ,
+                    "step_hz": SCAN_STEP_HZ,
+                    "windows_24": len(sliding_windows(*BAND_24_HZ)),
+                    "windows_5": len(sliding_windows(*BAND_5_HZ)) if self.include_5g else 0,
+                },
+            }
+        )
+        return data
 
     def notes(self) -> list[str]:
         self.refresh()

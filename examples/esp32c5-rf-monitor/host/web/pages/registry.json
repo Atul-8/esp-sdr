@@ -1,0 +1,37 @@
+[
+  {
+    "id": "spectrum",
+    "title": "实时频谱",
+    "hint": "曲线 + 3D 瀑布",
+    "title_en": "Live spectrum",
+    "hint_en": "curve + 3D waterfall"
+  },
+  {
+    "id": "waterfall",
+    "title": "周期瀑布图",
+    "hint": "全频段时频图",
+    "title_en": "Periodic waterfall",
+    "hint_en": "band-sweep heatmap"
+  },
+  {
+    "id": "wifi",
+    "title": "WiFi 信道体检",
+    "hint": "相对抬升排序",
+    "title_en": "WiFi survey",
+    "hint_en": "sorted by excess"
+  },
+  {
+    "id": "ble",
+    "title": "BLE 风险评估",
+    "hint": "广播信道 + 六档判词",
+    "title_en": "BLE risk",
+    "hint_en": "advertising channels"
+  },
+  {
+    "id": "raw",
+    "title": "原始输出",
+    "hint": "任意模块表格兜底",
+    "title_en": "Raw output",
+    "hint_en": "any module's table"
+  }
+]

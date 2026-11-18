@@ -12,6 +12,7 @@ import sys
 import time
 from typing import Sequence
 
+from app import bind_store
 from core.registry import Registry, discover
 from core.scheduler import Scheduler
 from core.store import Store
@@ -88,6 +89,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             if stale and os.path.exists(stale):
                 os.remove(stale)
     with Store(args.db, csv_path=args.csv) as store:
+        # 告警类模块（guard_58g 等）自己声明 store 槽位，由 app 层注入后才会落事件
+        bound = bind_store(registry, store)
+        if bound:
+            print(f"事件落库已绑定：{', '.join(bound)}")
         scheduler = Scheduler(source, registry, store=store)
         stats = scheduler.run(duration_s=args.duration)
         print()
@@ -110,6 +115,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         )
         print(f"入库：{store.count()} 行 → {args.db}")
+        for name in bound:
+            events = store.events(name)
+            if events:
+                print(f"事件：{name} {len(events)} 条 → {args.db}")
         if args.csv:
             print(f"CSV 旁路：{args.csv}")
         span = store.time_span()

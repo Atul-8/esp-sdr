@@ -21,22 +21,37 @@
 - IDF 版本：**v6.1**（eim 安装，`export.sh` 后用 `idf.py`）。
 - 目标芯片：`esp32c5`。
 
-**本机唯一可用的调用方式**（已验证，2026-11-18）：
+### ⛔ 编译：本机 Windows 一律不编译固件（2026-11-18 用户拍板）
+
+同一工程 Windows 本机编译比 Linux 构建机明显慢，**固件编译一律在远程 Ubuntu 构建机**（ssh 别名 `idf-vm`，ESP-IDF v6.1.1）。
+`testing/idf-c5.bat` 仅作历史参考，**禁止再用于 build**。本机只保留「烧录 + 实测」。
 
 ```sh
-# 在 Git Bash 里，从仓库根目录执行；不要用 export.sh / export.ps1（本机都失败，原因见下）
-cmd.exe //c "testing\idf-c5.bat version"     # 打印 ESP-IDF v6.1
-cmd.exe //c "testing\idf-c5.bat settarget"   # 首次或换目标时
-cmd.exe //c "testing\idf-c5.bat build"
-cmd.exe //c "testing\idf-c5.bat flash"       # 只烧，不挂 monitor（monitor 会占口）
+# ① 构建机编译（首次/全量走 stage 到本地盘：92 s；增量 10 s）
+#    共享盘里做首次全量会挂死（实测 29 min 无产物），所以全量必须 stage
+bash /c/.ai_global/meta/scripts/espidf-vm/vm-stage-build.sh E:/_00AE_PROJECR/esp32c5_sdr_app/repo
+
+# ② 取回要烧的产物（整组同一次构建，别和主机旧 bin 混用）
+cd /e/_00AE_PROJECR/esp32c5_sdr_app/repo && mkdir -p build/bootloader build/partition_table
+for f in esp_sdr.bin bootloader/bootloader.bin partition_table/partition-table.bin flash_args; do
+  scp -q idf-vm:/home/atul/work/repo/build/$f build/$f
+done
+
+# ③ 烧 COM56（不挂 monitor）
+cd build && python -m esptool --chip esp32c5 -p COM56 -b 460800   --before default-reset --after watchdog-reset write-flash "@flash_args"
+
+# ④ 烧完必须实测
+cd ../examples/esp32c5-rf-monitor && python -m app.live --port COM56 --duration 5 --gain-index 60
 ```
 
-`testing/idf-c5.bat` 干三件事：清掉 `MSYSTEM`、钉死 `IDF_PATH=D:\esp\v6.1\esp-idf`
-与 `IDF_PYTHON_ENV_PATH=D:\Espressif\python_env\idf6.1_py3.12_env`、`call export.bat`。
+实测记录（2026-11-18）：`vm-stage-build.sh` 全量 **92 s**、增量 **10 s** →
+`esp_sdr.bin` 823,680 B / `bootloader.bin` 21,312 B / `partition-table.bin` 3,072 B；
+esptool 烧录 `Wrote 823680 bytes ... Hash of data verified`；
+复位后 `app.live` → `C5SDR 6 burst 16380`、30 片 / 1073 帧 / 5.1 s / 错误 0。
 
 **本机踩过的坑（别重复踩）**
 
-1. `export.sh` / `export.ps1` 全部失败：默认 venv 指向不存在的 `idf6.1_py3.15_env`；
+1. （历史）`export.sh` / `export.ps1` 全部失败：默认 venv 指向不存在的 `idf6.1_py3.15_env`；
    且 `idf_tools.py` 里 `if 'MSYSTEM' in os.environ: fatal(...)` 会拦住 Git Bash/MSYS。
    注意：`env -u MSYSTEM` 在 MSYS 下**不生效**，必须在 cmd 里 `set "MSYSTEM="`（脚本已做）。
 2. 从 Git Bash 调 cmd 必须写 `cmd.exe //c`：写成 `/c` 会被 MSYS 路径转换吃掉，
@@ -95,6 +110,20 @@ cmd.exe //c "testing\idf-c5.bat flash"       # 只烧，不挂 monitor（monitor
   （实测 2.4G/5G 全部 100% 忙）。现在判「信道中位电平比本频段最安静信道高多少 dB」：
   `8/15/25 dB ⇒ 轻度/拥挤/重度`，安静环境全归零，有 AP 的信道 +20~+40 dB。
 - 20 MS/s 窗（±10MHz）整窗都是有效通带；80 MS/s 窗边缘约 60% 是 0 码，不能用来判占用。
+
+## 5.8G 守卫口径（2026-11-18 补，实测得出）
+
+- **频段上限 5895 MHz**：C5 调谐上限就是 5895，任务书写的 5900 不可达；守卫实现 5700–5895。
+- **窗中心 ±250 kHz 与本机直流泄漏重合，必须挖掉**：5740 / 5768 / 5450 MHz 三个频点、
+  每个窗正中心都有一根 **3 格宽、高出底噪 33~43 码**的尖峰，形状完全一致 → 是接收机
+  直流/LO 泄漏，不是环境信号。不挖会得到「每个窗中心都有一条持续窄带」的假报警
+  （实测 13 窗 → 13 条）。
+- **窗两侧各 0.5 MHz 也要挖**：20 MHz 窗靠边的滚降本身高出均值 10~27 码。
+- **0.1 MHz 级持续凸起 = 本振/时钟杂散**（实测 5708 / 5776 MHz，3 格宽、两侧一格就掉回
+  底噪、占空比 88~97%）→ 判「单频点」，与图传（「窄带」，≥1 MHz）分开报，不许混类。
+- **没有真 5.8G 发射器时，正样本靠回放注入自证**：`testing/guard_replay.py` 把合成信号
+  加到真板录的 snapshot 上，能复现 4 MHz/96% 占空比/持续 9.4 s 的告警；
+  灵敏度下限 = `ALERT_DB` 10 码（+8 码按设计漏报），弱信号下带宽会低估。
 
 ## 边界
 

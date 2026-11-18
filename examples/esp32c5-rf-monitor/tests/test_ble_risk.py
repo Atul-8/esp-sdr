@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import math
+import random
 import unittest
 
 from core.registry import Output, Registry, ScanRequest, discover
@@ -16,11 +18,16 @@ from modes.ble_risk import (
     BLE_DATA_FIRST_HZ,
     BLE_DATA_LAST_HZ,
     BLE_STEP_HZ,
+    CONTRAST_DB,
     DEGENERATE_MAX_CODE,
     DWELL_MS,
+    LIGHT_RATIO,
     PRESENCE_DB,
     PROMINENCE_DB,
     RISK_BLE,
+    RISK_COMPLEX,
+    RISK_FLAT,
+    RISK_LIGHT,
     RISK_MIXED,
     RISK_NONE,
     RISK_WIFI,
@@ -35,8 +42,171 @@ from modes.ble_risk import (
 )
 from tests.mock_source import MockSource, SpectrumSynthesizer
 
+#: 合成器：直接给「按频率定义的电平形状 + 高斯抖动」，用于验证判决逻辑是否完备
+_CLOCK = 0.0
+
+
+def _feed_shape(plugin, shape, frames=12, sigma=3.0, seed=1):
+    """按 ``shape(freq_hz, k)`` 合成每个扫描窗的若干帧，直接喂给插件。"""
+    global _CLOCK
+    for request in plugin.scan_requests():
+        rng = random.Random(seed * 7919 + request.freq_hz // 1_000_000)
+        step = request.bw_hz / request.bins
+        start = request.freq_hz - request.bw_hz / 2
+        for k in range(frames):
+            codes = [
+                shape(start + (index + 0.5) * step, k) + rng.gauss(0.0, sigma)
+                for index in range(request.bins)
+            ]
+            _CLOCK += 0.1
+            plugin.on_snapshot(
+                Snapshot(
+                    ts=_CLOCK,
+                    center_hz=request.freq_hz,
+                    bw_hz=request.bw_hz,
+                    bins_db=codes,
+                )
+            )
+    return plugin
+
 #: 场景跑一遍要几百帧合成，多个测试共用一份结果（合成器是纯函数式，结果稳定）
 _REPORTS: dict[str, BleRisk] = {}
+
+
+# ---------------------------------------------------------------------------
+# 判决逻辑完备性（仿真佐证）：完全安静 / 很浅的干扰 / 复杂噪音 / 分不清的宽带
+# ---------------------------------------------------------------------------
+def _silence(_freq, _k):
+    """什么都没有：只有底噪。"""
+    return 20.0
+
+
+def _shallow(_freq, k):
+    """很浅的干扰：广播信道 37 上有 +6 dB 的窄脉冲（半个帧在、半个帧不在）。
+
+    低于判定门限 12 dB，所以不许判成「有 BLE 广播」，但也绝不能和「完全安静」混为一谈。
+    """
+    level = 20.0
+    if 2_401_000_000 <= _freq <= 2_403_000_000 and k % 2 == 0:
+        level += 6.0
+    return level
+
+
+def _complex(_freq, k):
+    """复杂噪音：一段常抬 12 dB 的宽带 + 一个常亮 CW + 广播信道 38 上的浅脉冲。"""
+    level = 20.0
+    if 2_430_000_000 <= _freq <= 2_455_000_000:
+        level += 12.0
+    if abs(_freq - 2_440_000_000) <= 1_000_000:
+        level += 25.0
+    if 2_425_000_000 <= _freq <= 2_427_000_000 and k % 3 == 0:
+        level += 8.0
+    return level
+
+
+def _static_hump(freq, _k):
+    """固定形状：整段 2.4G 一个高斯鼓包，**随时间一动不动**（像前端滤波器的起伏）。"""
+    return 20.0 + 18.0 * math.exp(-(((freq - 2_442_000_000) / 28_000_000) ** 2))
+
+
+def _flicker_hump(freq, k):
+    """同样的鼓包 + 其中一段（真·宽带源的覆盖区）随时间开关。
+
+    物理上对得上：前端增益是固定的，会开关的是**信号**（WiFi AP 发包/休眠），
+    不会整段 2.4G 一起上下动 25 dB。
+    """
+    level = _static_hump(freq, k)
+    if 2_430_000_000 <= freq <= 2_478_000_000 and k % 2 == 0:
+        level += 25.0
+    return level
+
+
+def _uniform_flicker(freq, k):
+    """病态输入：整段一起上下动（增益/底噪在动）——必须落到「分不清」，不许冒认。"""
+    return _static_hump(freq, k) + (25.0 if k % 2 == 0 else 0.0)
+
+
+class DiscriminationTest(unittest.TestCase):
+    """五档现实输入必须给出五个不同的判词（这是「逻辑完备」的最小证明）。"""
+
+    @classmethod
+    def setUpClass(cls):
+        # 24 帧/窗 ⇒ 广播信道有效帧 > MIN_ADV_FRAMES(60)，浅抬升证据才有资格成立
+        cls.silence = _feed_shape(BleRisk(), _silence, frames=24, sigma=3.0)
+        cls.shallow = _feed_shape(BleRisk(), _shallow, frames=24, sigma=3.0)
+        cls.complex_noise = _feed_shape(BleRisk(), _complex, frames=24, sigma=3.0)
+        cls.static_shape = _feed_shape(BleRisk(), _static_hump, frames=24, sigma=8.0)
+        cls.flicker = _feed_shape(BleRisk(), _flicker_hump, frames=24, sigma=8.0)
+        cls.uniform = _feed_shape(BleRisk(), _uniform_flicker, frames=24, sigma=8.0)
+
+    def test_silence_is_no_risk(self):
+        ev = self.silence.evidence()
+        self.assertEqual(self.silence.risk_type(), RISK_NONE)
+        self.assertEqual(ev["adv_activity"], 0.0)
+        self.assertLess(ev["wideband"], 0.05)
+        self.assertLess(ev["shallow"], LIGHT_RATIO)
+        self.assertLess(self.silence.score(), 10.0)
+
+    def test_shallow_interference_is_not_silence(self):
+        ev = self.shallow.evidence()
+        self.assertGreaterEqual(ev["adv_frames"], 60, "浅抬升证据要够样本量才成立")
+        # 不许判成"有 BLE 广播"（抬升没到门限）……
+        self.assertEqual(ev["adv_activity"], 0.0)
+        # ……但必须和完全安静分开
+        self.assertGreaterEqual(ev["shallow"], LIGHT_RATIO)
+        self.assertEqual(self.shallow.risk_type(), RISK_LIGHT)
+        self.assertNotEqual(self.shallow.risk_type(), self.silence.risk_type())
+
+    def test_complex_noise_is_its_own_verdict(self):
+        ev = self.complex_noise.evidence()
+        self.assertGreaterEqual(ev["slots_persistent"], 1.0, "常亮 CW 必须被认出来")
+        self.assertEqual(self.complex_noise.risk_type(), RISK_COMPLEX)
+
+    def test_static_shape_is_not_blamed_on_wifi(self):
+        ev = self.static_shape.evidence()
+        self.assertGreaterEqual(ev["wideband"], WIDEBAND_FRAC, "形状确实铺满整段")
+        self.assertLess(ev["contrast_db"], CONTRAST_DB, "形状在时间上不动")
+        self.assertEqual(self.static_shape.risk_type(), RISK_FLAT)
+
+    def test_flicker_wideband_is_blamed(self):
+        ev = self.flicker.evidence()
+        self.assertGreaterEqual(ev["wideband"], WIDEBAND_FRAC)
+        self.assertGreaterEqual(ev["contrast_db"], CONTRAST_DB, "开关型宽带源时间上在动")
+        self.assertEqual(self.flicker.risk_type(), RISK_WIFI)
+
+    def test_five_verdicts_are_pairwise_distinct(self):
+        verdicts = [
+            case.risk_type()
+            for case in (self.silence, self.shallow, self.complex_noise, self.static_shape, self.flicker)
+        ]
+        self.assertEqual(
+            len(set(verdicts)), len(verdicts), f"判词必须互不相同，实际：{verdicts}"
+        )
+
+    def test_uniform_motion_is_reported_as_ambiguous(self):
+        """整段一起动 ⇒ 分不清（宁可说分不清，也不冒认 WiFi）。"""
+        self.assertEqual(self.uniform.risk_type(), RISK_FLAT)
+
+    def test_high_gain_headroom_warning(self):
+        """底噪参考码被抬太高时必须提醒"占用率随增益走"，否则读数会被当真值。"""
+        hot = _feed_shape(BleRisk(), lambda freq, k: 60.0 + 18.0 * math.exp(-(((freq - 2_442_000_000) / 28_000_000) ** 2)), frames=16, sigma=8.0)
+        self.assertGreaterEqual(hot.ref_db, 12.0)
+        self.assertIn("增益", hot.headroom_warning())
+        self.assertTrue(any("增益" in line for line in hot.hints()))
+        self.assertIn("headroom_warning", hot.ble_report())
+        # 低增益（底噪贴 0 码）不该告警
+        quiet_low_gain = _feed_shape(BleRisk(), lambda _freq, _k: 3.0, sigma=2.0)
+        self.assertLess(quiet_low_gain.ref_db, 12.0)
+        self.assertEqual(quiet_low_gain.headroom_warning(), "")
+
+    def test_evidence_payload_is_serializable(self):
+        ev = self.flicker.evidence()
+        self.assertEqual(
+            set(ev),
+            {"adv_activity", "shallow", "wideband", "contrast_db", "rise_floor",
+             "slots", "slots_persistent", "adv_frames"},
+        )
+        self.assertIn("evidence", self.flicker.ble_report())
 
 
 def run_scenario(scenario: str, passes: int = 8, frames: int = 3, seed: int = 11) -> BleRisk:

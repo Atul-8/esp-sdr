@@ -1,0 +1,18 @@
+<div class="panel">
+  <div class="panel__head">
+    <span class="panel__title" data-i18n="raw.title">任意模块的产出（通用兜底页）</span>
+    <span class="panel__hint" data-i18n="raw.hint">新实验只写了 produce() 也能在这里看表格；不用为每个实验改前端</span>
+  </div>
+  <div class="panel__body" id="raw-tables"><div class="muted" data-i18n="raw.wait">等待样本</div></div>
+</div>
+
+<div class="panel">
+  <div class="panel__head">
+    <span class="panel__title" data-i18n="raw.asciiTitle">CLI 同款 ASCII 输出</span>
+    <span class="panel__hint" data-i18n="raw.asciiHint">和 python -m app.live 打印的一模一样，方便对照</span>
+  </div>
+  <div class="panel__body">
+    <div class="muted" style="margin-bottom:6px;" data-i18n="raw.asciiLang">模块自带的文本沿用模块语言（与命令行一致），界面语言只翻外壳。</div>
+    <pre class="raw" id="raw-text" data-i18n="raw.notConnected">（未连接）</pre>
+  </div>
+</div>

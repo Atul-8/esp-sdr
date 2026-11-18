@@ -14,6 +14,7 @@ import sys
 import time
 from typing import Sequence
 
+from app import bind_store
 from core.registry import Registry, discover
 from core.scheduler import Scheduler
 from core.serial_link import EspSdrLink, SerialLinkError
@@ -80,6 +81,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         for note in notes:
             print(f"! {note}")
+        bound = bind_store(registry, store)
+        if bound:
+            print(f"事件落库已绑定：{', '.join(bound)}")
         scheduler = Scheduler(link, registry, store=store)
         stats = scheduler.run(duration_s=args.duration)
         print()
@@ -102,6 +106,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         if store is not None:
             print(f"入库：{store.count()} 行 → {args.db}")
+            for name in bound:
+                events = store.events(name)
+                if events:
+                    print(f"事件：{name} {len(events)} 条 → {args.db}")
         if stats.source_errors:
             print(f"! 源错误 {stats.source_errors} 次：{stats.last_source_error}")
         for plugin in registry.plugins:
