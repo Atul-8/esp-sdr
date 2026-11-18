@@ -36,7 +36,17 @@ from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QApplication
 
 import paths  # noqa: E402 - 本地模块，负责定位分析层
-from session import ENGINES, LANGS, WEB_DIR, HostConfig, HostSession, list_ports, to_json, tr  # noqa: E402
+from session import (  # noqa: E402
+    ENGINES,
+    LANGS,
+    WEB_DIR,
+    HostConfig,
+    HostSession,
+    error_text,
+    list_ports,
+    to_json,
+    tr,
+)
 
 #: 分析层目录（core/ modes/ 所在）。找不到会在这里就抛明确的错误。
 SRC_DIR = paths.ensure_on_path()
@@ -363,7 +373,7 @@ class Runner(QThread):
                 bridge.spectrum.emit(to_json(session.spectrum(snap)))
                 self.box["spectrum_emits"] = int(self.box.get("spectrum_emits", 0) or 0) + 1
             except Exception as exc:  # noqa: BLE001 - 一帧打包失败不该停掉整个会话
-                bridge.log.emit(tr(self.lang, "pack_failed", error=f"{type(exc).__name__}: {exc}"))
+                bridge.log.emit(tr(self.lang, "pack_failed", error=error_text(self.lang, exc)))
             if pace:
                 time.sleep(pace)
 
@@ -395,7 +405,7 @@ class Runner(QThread):
                     if stats.source_errors > seen_errors:
                         seen_errors = stats.source_errors
                         consecutive_errors += 1
-                        message = stats.last_source_error or "scan failed"
+                        message = error_text(self.lang, stats.last_source_error) if stats.last_source_error else "scan failed"
                         if message != self.last_error:
                             self.last_error = message
                             bridge.log.emit(tr(self.lang, "rf_error", message=message))
@@ -407,7 +417,7 @@ class Runner(QThread):
                     else:
                         consecutive_errors = 0
         except Exception as exc:  # noqa: BLE001
-            bridge.log.emit(tr(self.lang, "thread_error", error=f"{type(exc).__name__}: {exc}"))
+            bridge.log.emit(tr(self.lang, "thread_error", error=error_text(self.lang, exc)))
         finally:
             try:
                 session.close()
@@ -662,7 +672,7 @@ class HostWindow(QObject):
             session = HostSession(bins_out=config.bins_out)
             info = session.open(config)
         except Exception as exc:  # noqa: BLE001 - 打不开端口是最常见的用户错误
-            message = f"{type(exc).__name__}: {exc}"
+            message = error_text(self.lang, exc)
             self.bridge.log.emit(tr(self.lang, "already_running_log", message=message))
             self.bridge.state.emit(to_json({"state": "error", "message": message}))
             return {"ok": False, "message": message}
@@ -839,7 +849,14 @@ CJK_SCAN_JS = """
   }
   function add(where, text, el) {
     var t = String(text === null || text === undefined ? "" : text).trim();
-    if (t && CJK.test(t)) hits.push(where + "@" + (el ? path(el) : "?") + ": " + t.slice(0, 140));
+    if (!t) return;
+    // 只截前 140 字符是不够的：ASCII 面板一开头几百字全是英文，中文在后面就看不到现场，
+    // 报出来只有「有这么一条」却没法定位。改成以第一处中文为中心开窗。
+    var m = CJK.exec(t);
+    if (!m) return;
+    var lo = Math.max(0, m.index - 60);
+    var frag = (lo > 0 ? "..." : "") + t.slice(lo, lo + 200);
+    hits.push(where + "@" + (el ? path(el) : "?") + ": " + frag);
   }
   var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null);
   while (walker.nextNode()) {

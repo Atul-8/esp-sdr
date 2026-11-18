@@ -577,9 +577,10 @@ epo\examples\esp32c5-rf-monitor`；`ESPSDR_SRC=/tmp` 正确抛错 |
 
 | 项 | 命令 | 结果 |
 | --- | --- | --- |
-| 下行 payload（10 场景 × 6 出口 + `render_text`） | `cd host && python tests/test_l10n.py -v` | **10 tests OK**（84 s）；en 残留 0 / zh 仍有大量中文（防误翻） |
+| 下行 payload（10 场景 × 6 出口 + `render_text`） | `cd host && python tests/test_l10n.py -v` | **22 tests OK**（85 s）；en 残留 0 / zh 仍有大量中文（防误翻） |
 | 反向验证（清空词典） | 同上临时把 `l10n.TABLE` 清空 | **失败并报出 3586 条**残留 —— 证明这条断言真会抓东西 |
-| 网页 DOM（6 页全扫） | `cd host && python app.py --selftest --seconds 10 --mock` | `en_cjk.hitCount = 0`、`missingCount = 0`（`en_no_cjk` / `en_keys_complete` 全绿） |
+| 网页 DOM（6 页全扫，假固件） | `cd host && python app.py --selftest --seconds 10` | `en_cjk.hitCount = 0`、`missingCount = 0`（`en_no_cjk` / `en_keys_complete` 全绿），**52/52 项** |
+| 网页 DOM（6 页全扫，**真板 COM56**） | `cd host && python app.py --selftest --real --port COM56 --gain-index 60 --seconds 12` | **`EXIT=0`，`ok:true`，`hits 0`，`missing 0`，`checks 52` 全绿**（`raw.panels 5`、`device.frames 314` / `misses 0` / `distinct 90`） |
 | 骨架缺口自查 | `python testing/chk_l10n.py` | `英文模式下仍未翻掉的中文串 0 条 / 缺条目 0 / 占位不符 0` |
 | 网页源码静态残留 | `python testing/_web_cjk.py` | 非兜底中文只剩「双语言映射表」与注释（兜底值都会被词典覆盖，DOM 扫描已证实） |
 
@@ -587,12 +588,24 @@ epo\examples\esp32c5-rf-monitor`；`ESPSDR_SRC=/tmp` 正确抛错 |
 `[placeholder]` / `option`，豁免 `[data-lang-toggle]`（只有这一个按钮允许中文）；逐页 1.7 s
 （`raw` 页 2.6 s）等渲染再扫，6 页一轮。
 
+### 只在真板才暴露的三类漏网（假场景全绿也抓不到）
+
+| 类 | 现场 | 为什么 mock 抓不到 | 修法 |
+| --- | --- | --- | --- |
+| 负数字段 | 真板安静频段 `开关幅度 -2.0 码` | 假场景的开关幅度恒为正 → 骨架里多出个减号，整段模板不命中 | `NUM_RE` 带符号 `-?\d+(?:\.\d+)?`；模板里硬编码的 `≤-{}` 改 `≤{}`（负号随数字走） |
+| 只在真板触发的风险档 | `宽带常开/形状疑似`（`RISK_FLAT`）+ 整段 hints + BLE 标题 | 假场景永远走不到这档（真板安静频段 `contrast_db < CONTRAST_DB` 就落到这里） | TABLE 补齐单名/两处 `风险：**…**（评分…）` / BLE 标题 / hints 整段；`test_l10n.py::RareRiskTypesTest` 造高斯鼓包固化 |
+| **列表长度可变** | `- 有明显抬升（轻度以上）的信道：ch1, ch2, ch7, ch8, ch9, ch10。`（6 个） | 词典按 mock 见过的 1/4/5/9/10/11/12 个备条目，真板这次是 6 个 → 占位数量对不上 | 这三句改走 `LIST_PATTERNS` 正则（命名组、只换外壳，列表原样），长度任意；`ListSentenceTest` 把 1~12 全铺一遍 |
+| **异常文案** | `SerialLinkError: 连接已标记失效，请重新打开`（经 `[RF error]` / 底部日志上屏） | 异常文案不走表格 payload，也不在 `modes/` 判词里；只有真板出错才出现 | `l10n.translate_error()`：先查表、再按 `ERROR_PHRASES` 片段换、最后剔掉非 ASCII（保证零中文，数字/设备回显保留）；`session.error_text()` 在 `rf_error` / `auto_throttle` / `thread_error` / `pack_failed` / `read_link_failed` 五处出口统一过一遍 |
+
 ### 边界
 
 1. **命令行/终端输出仍是中文**：本轮只要求图形界面英文零中文，`app.live` 等 CLI 不动；
 2. **模块判据一个字没改**：`modes/` 里的门槛、判词顺序、边界声明全部原样，英文只是文案层；
 3. 英文模板是「骨架匹配 + 数字回填」，**新增判词必须同时补 `host/l10n.py` 的 TABLE**，
-   否则该条会原样漏中文 —— `tests/test_l10n.py` 就是拦这个的；
+   否则该条会原样漏中文 —— `tests/test_l10n.py` 就是拦这个的；**列表长度会变的句子**
+   别走 TABLE（占位数量随长度变），补 `LIST_PATTERNS`；**异常文案**一律过
+   `session.error_text()`，别把 `str(exc)` 直接拼进界面串；
+5. 异常文案为保零中文会**剔掉非 ASCII 部分**——固件回显与数字留着，中文细节只在终端日志里；
 4. `_web_cjk.py` 里剩余的英文模式中文属于**双语言映射表**（逻辑用，不上屏），不是漏翻。
 
 ---

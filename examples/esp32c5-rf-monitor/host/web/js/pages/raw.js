@@ -9,6 +9,10 @@ window.Pages.raw = (function () {
 
   function onEnter(host) {
     root = host;
+    // 进页先按缓存重画一次：表格是按时间片推下来的，切页那一刻多半还没轮到下一片。
+    // 踩过：真板自检里 raw 页 `panels 0`——页面刚进来、下一片还没到，探针就抓了个空
+    // （别的页 onEnter 都会 `if (lastPayload) render(...)`，只有这页漏了）。
+    if (lastTables) onTables(lastTables);
     refreshText();
     textTimer = setInterval(refreshText, 3000); // ASCII 版全量渲染较贵，3s 一次足够
   }

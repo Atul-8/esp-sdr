@@ -58,14 +58,18 @@ python host/app.py --selftest --seconds 10 --mock --engine device   # 设备自�
 #    → 报告末尾 "checks": 52 项全 true，退出码 0（host / device 两条引擎都验过）
 #    ⚠️ 别把 --seconds 压到 8：页面探针没跑完，画布/瀑布那几项会假红
 #    ⚠️ 自检会真的切一次语言并逐页扫 DOM：`en_no_cjk` / `en_keys_complete` 红了就是英文界面
-#       里漏了中文（补 host/l10n.py 的 TABLE 或 web/js/i18n.js 的 en 词典）
+#       里漏了中文。三种修法，按现场选：
+#         · 普通判词/表格 → 补 host/l10n.py 的 TABLE
+#         · 列表长度会变（`ch1, ch2, …`）→ 补 LIST_PATTERNS 正则（TABLE 按长度备条目必漏）
+#         · 异常文案（`[RF error] …`）→ 补 ERROR_PHRASES 片段，界面侧走 session.error_text()
+#       前端静态词条则补 web/js/i18n.js 的 en 词典。真板才会出现的档位，必须跑 --real 才验得到。
 
 # 4) 指定窗口尺寸（验「窗口态也不裁按钮」）
 python host/app.py --mock --window-size 1024x680
 
 # 逻辑层自测（不开窗口）
 python -m unittest discover -s host/tests -t . -v
-python tests/test_l10n.py -v          # 英文下行零中文（10 场景 × 6 出口 + ASCII 页）
+python tests/test_l10n.py -v          # 英文下行零中文（10 场景 × 6 出口 + ASCII 页 + 列表句 + 异常文案）
 ```
 
 Windows 上也可以双击 `host/start.bat`（缺依赖会自动 `pip install`）。

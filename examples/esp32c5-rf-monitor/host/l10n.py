@@ -24,8 +24,14 @@ from typing import Any
 #: CJK 统一表意文字（够用：项目里不会出现假名/韩文）
 CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]")
 
-#: 数字段（含小数/负号不算，负号单独留在模板里，避免模板键互相吃掉）
-NUM_RE = re.compile(r"\d+(?:\.\d+)?")
+#: 非 ASCII 段（异常文案兜底时整段剔掉，剩下的数字/设备回显才是有效信息）
+def _ascii_only(text: str) -> str:
+    """剔掉非 ASCII 字符（异常文案兜底用：剩下的数字/设备回显才算信息）。"""
+    return "".join(ch if ch.isascii() else " " for ch in text)
+
+#: 数字段（**带符号**）：``-2.0`` 整段算一个 ``{}``，回填时符号跟着回来。
+#: 少了这个 ``-?``，像「开关幅度 -2.0 码」这种负数的骨架就与模板对不上 → 英文界面漏中文。
+NUM_RE = re.compile(r"-?\d+(?:\.\d+)?")
 
 
 def has_cjk(text: str) -> bool:
@@ -191,6 +197,17 @@ TABLE: dict[str, str] = {
         "Scan: {}MHz window / {}MHz step overlapping sweep; frames whose whole window is {} codes are dropped "
         "({} frames); channel coverage <{}% is recorded as \"no coverage\".",
 
+    # 单独出现的风险类型名（抓档表单元格、卡片大标题、前端 U.riskClass 的键）
+    "宽带常开/形状疑似": "wideband always-on / shape-like",
+    "轻微干扰": "slight interference",
+
+    "风险：**宽带常开/形状疑似**（评分 {}/{}，宽带占用 {}%，广播活动 {}%，数据区 {} 栅格/帧）。":
+        "Risk: **wideband always-on / shape-like** (score {}/{}, wideband occupancy {}%, advertising activity "
+        "{}%, data region {} grids/frame).",
+    "风险：**轻微干扰**（评分 {}/{}，宽带占用 {}%，广播活动 {}%，数据区 {} 栅格/帧）。":
+        "Risk: **slight interference** (score {}/{}, wideband occupancy {}%, advertising activity {}%, data "
+        "region {} grids/frame).",
+
     "风险：**复杂噪音（多源混合）**（评分 {}/{}，宽带占用 {}%，广播活动 {}%，数据区 {} 栅格/帧）。":
         "Risk: **complex noise (multi-source mixed)** (score {}/{}, wideband occupancy {}%, advertising "
         "activity {}%, data region {} grids/frame).",
@@ -206,6 +223,16 @@ TABLE: dict[str, str] = {
     "风险：**混合型**（评分 {}/{}，宽带占用 {}%，广播活动 {}%，数据区 {} 栅格/帧）。":
         "Risk: **mixed** (score {}/{}, wideband occupancy {}%, advertising activity {}%, data region {} "
         "grids/frame).",
+
+    # RISK_FLAT 专有 hints：宽带占用高、但时间上几乎不开关 → 只下「形状疑似」，不下 WiFi 结论
+    "宽带占用 {}%（≥{}%），但这些频点在时间上几乎不开关（开关幅度 {} 码，判据 ≥{}）→ 分不清是"
+    "「常开宽带源」还是「前端滤波器的固定起伏（形状）」，所以不下 WiFi 结论。想定性：换一档增益再测一次"
+    "（形状随增益走、占用不随），或做一次对照空窗（把可疑设备全关掉）比两次的宽带占用率。":
+        "Wideband occupancy is {}% (≥{}%), but these frequencies barely switch on and off in time (switching "
+        "swing {} codes, gate ≥{}) — so this cannot be told apart from an always-on wideband source or the "
+        "front end's own fixed ripple (shape). No WiFi verdict is drawn. To settle it: re-measure at a "
+        "different gain (shape follows gain, occupancy does not), or compare two runs with the suspect device "
+        "switched off (control window).",
 
     "比 {} kHz 还窄的段记「单频点」（实板环境里就是本振/时钟杂散，不是摄像头；照实报但类别分开，"
     "别误读成图传）。":
@@ -280,9 +307,9 @@ TABLE: dict[str, str] = {
         "{}G: no WiFi channel in use was measured (all wideband shares are below {}%, or there are too few "
         "samples).",
 
-    "跨窗跳频不追：只判同一 {} MHz 窗内两个频点交替（相关系数 ≤-{}）。":
+    "跨窗跳频不追：只判同一 {} MHz 窗内两个频点交替（相关系数 ≤{}）。":
         "Cross-window hopping is not chased: only two alternating frequencies inside the same {} MHz window "
-        "are judged (correlation ≤-{}).",
+        "are judged (correlation ≤{}).",
 
     "周期快照，非连续实时：一轮 {} 窗，本次统计跨度 {} s / {} 帧。":
         "Periodic snapshots, not continuous real time: {} windows per round, this sample spans {} s / {} "
@@ -292,6 +319,10 @@ TABLE: dict[str, str] = {
         "Periodic snapshots, not continuous real time: {} windows per round; the RF stops scanning while "
         "capturing (single radio, time-sliced).",
 
+    "BLE 广播信道风险评估 — 风险：宽带常开/形状疑似（评分 {}/{}）":
+        "BLE advertising-channel risk assessment — risk: wideband always-on / shape-like (score {}/{})",
+    "BLE 广播信道风险评估 — 风险：轻微干扰（评分 {}/{}）":
+        "BLE advertising-channel risk assessment — risk: slight interference (score {}/{})",
     "BLE 广播信道风险评估 — 风险：复杂噪音（多源混合）（评分 {}/{}）":
         "BLE advertising-channel risk assessment — risk: complex noise (multi-source mixed) (score {}/{})",
     "BLE 广播信道风险评估 — 风险：WiFi 压制型（评分 {}/{}）":
@@ -494,6 +525,99 @@ TABLE: dict[str, str] = {
 }
 
 
+#: 「列表长度会变」的句子：骨架匹配天生干不了这类活——占位数量随列表长度变，
+#: 而模板是固定的。所以单独用正则：**只换句子外壳，列表原样（数字不参与翻译）**。
+#: 踩过：真板上「有明显抬升的信道」是 6 个，词典里只备了 1/4/5/9/10/11/12 个，
+#: 差这 2 个就整句漏中文——英文界面里一眼看不出是「少了个长度」。
+#: 异常文案里常混着固件回显和数字，骨架对不上，改按「已知中文片段」换；
+#: 片段之外剩下的 ASCII 尾巴（数字、``SPEC``/``FSM`` 之类）原样保留。
+ERROR_PHRASES: list[tuple[str, str]] = [
+    ("连接已标记失效，请重新打开", "the link was marked dead, reopen the port"),
+    ("串口读取超时（无数据）", "serial read timeout (no data)"),
+    ("无法取得串口租约（SYNC 未回显）", "could not take the serial lease (no SYNC echo)"),
+    ("FSM STOP 未收到 FSMEND（在途帧没排空）",
+     "FSM STOP got no FSMEND (in-flight frames were not drained)"),
+    ("固件未通告频谱能力（CAPS 无 SPECCAPS），无法扫描",
+     "the firmware announced no spectrum capability (CAPS has no SPECCAPS), cannot scan"),
+    ("缺少 pyserial：pip install pyserial", "pyserial is missing: pip install pyserial"),
+    ("连接未打开", "the port is not open"),
+    ("连接已标记失效", "the link was marked dead"),
+    ("帧同步丢失", "frame sync lost"),
+    ("频谱帧解析失败", "spectrum frame could not be parsed"),
+    ("SPEC 未产出任何帧", "SPEC produced no frame"),
+    ("SPECEND 记录异常", "SPECEND record looks wrong"),
+    ("SPEC 启动回复异常", "unexpected SPEC start reply"),
+    ("SPEC 剖面与请求不符", "SPEC profile does not match the request"),
+    ("SPECINFO? 回复异常", "unexpected SPECINFO? reply"),
+    ("FSMPLAN 回读不符", "FSMPLAN read-back mismatch"),
+    ("FSMPLANEND 缺失", "FSMPLANEND missing"),
+    ("FSM START 回复异常", "unexpected FSM START reply"),
+    ("频点超出固件范围", "frequency outside the firmware range"),
+    ("固件的便携快照 stride 必须为 1，实际", "portable snapshot stride must be 1, got"),
+    ("固件剖面点数异常", "firmware profile bin count looks wrong"),
+    ("二进制读取超时", "binary read timeout"),
+    ("CAP20 载荷不足", "CAP20 payload too short"),
+    ("I/Q 载荷 CRC32 不匹配", "I/Q payload CRC32 mismatch"),
+    ("扫频计划不能为空", "the sweep plan cannot be empty"),
+    ("（需重新连接）", "(reconnect needed)"),
+    ("帧长度不符", "frame length mismatch"),
+    ("CRC32 不匹配", "CRC32 mismatch"),
+    ("帧太短", "frame too short"),
+    ("magic 不匹配", "magic mismatch"),
+    ("不支持的 FFT 点数", "unsupported FFT size"),
+    ("统计记录 CRC 不匹配", "stat record CRC mismatch"),
+    ("统计记录格式错误", "stat record layout is wrong"),
+    ("不支持的采样位宽", "unsupported sample width"),
+    ("dwell_ms 超出固件范围", "dwell_ms outside the firmware range"),
+]
+
+
+LIST_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"^(?P<band>-?[0-9.]+G) 在用的 WiFi 信道：(?P<list>.+)$"),
+     "WiFi channels in use on {band}: {list}"),
+    (re.compile(r"^(?P<band>-?[0-9.]+G) 建议避开（占用偏高）：(?P<list>.+)。$"),
+     "{band}: avoid these (occupancy too high): {list}."),
+    (re.compile(r"^有明显抬升（轻度以上）的信道：(?P<list>.+)。$"),
+     "Channels with a clear rise (mild or worse): {list}."),
+]
+
+
+def _translate_list(text: str) -> str | None:
+    """列表句：只换外壳，列表内容（``ch1, ch6`` 之类）原样带回。
+
+    用**命名组**而不是反向引用：反向引用要写反斜杠，跨工具传递时极易被吃掉
+    （本项目踩过两次），命名组一个转义都不用。
+    """
+    for pattern, template in LIST_PATTERNS:
+        match = pattern.match(text)
+        if match is None:
+            continue
+        fields = {name: ("none" if value == "无" else value) for name, value in match.groupdict().items()}
+        return template.format(**fields)
+    return None
+
+
+
+def translate_error(text: str) -> str:
+    """英文模式下的异常文案：**保证不残留中文**（数字与设备回显尽量保住）。
+
+    异常信息走的是另一条路：正文里常混着固件回显（``ERR fsm_args``）和数字，
+    骨架匹配基本对不上，所以先用 :data:`ERROR_PHRASES` 按片段换，再把剩下来的
+    非 ASCII 字符剔掉。剔掉的部分不是丢了——终端日志里还是原文。
+    """
+    if not text or not has_cjk(text):
+        return text
+    full = translate(text)
+    if not has_cjk(full):
+        return full
+    out = text
+    for zh, en in ERROR_PHRASES:
+        if zh in out:
+            out = out.replace(zh, " " + en + " ")
+    tail = re.sub(r"\s{2,}", " ", _ascii_only(out)).strip(" :;,、")
+    return f"error: {tail}" if tail else "error (details in the terminal log)"
+
+
 def translate(text: str) -> str:
     """中文 → 英文；翻不了就原样返回（调用方用 :func:`has_cjk` 兜底检查）。"""
     if not text or not has_cjk(text):
@@ -504,7 +628,8 @@ def translate(text: str) -> str:
     key = skeleton(text)
     template = TABLE.get(key)
     if template is None:
-        return text
+        listed = _translate_list(text)
+        return text if listed is None else listed
     numbers = NUM_RE.findall(text)
     if template.count("{}") != len(numbers):
         return text  # 模板与骨架占位不一致：宁可原样返回，也不给错位数字

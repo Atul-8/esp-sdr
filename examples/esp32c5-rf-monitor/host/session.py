@@ -102,6 +102,17 @@ def tr(lang: str | None, key: str, **kwargs: Any) -> str:
     except (KeyError, IndexError):
         return template
 
+def error_text(lang: str | None, error: object) -> str:
+    """异常 / 错误串 → 界面文案。
+
+    英文模式**保证不残留中文**：异常正文常带固件回显与数字，骨架匹配基本对不上，
+    所以走 :func:`l10n.translate_error`（片段替换 + 剔掉非 ASCII）。中文模式原样，
+    终端日志里始终是原文，所以剔掉的部分不会真的丢。
+    """
+    text = f"{type(error).__name__}: {error}" if isinstance(error, BaseException) else str(error)
+    return l10n.translate_error(text) if lang == "en" else text
+
+
 #: 默认下行点数：前端画图够用，又不至于把 QWebChannel 灌满（1024 → 256 取桶内最大值）
 DEFAULT_BINS_OUT = 256
 
@@ -464,7 +475,7 @@ class HostSession:
         try:
             payload = summary(self.registry)
         except Exception as exc:  # noqa: BLE001 - 体检炸了不能让界面崩
-            return self._out({"kind": "anti_peep_audit", "headline": tr(self.lang, "audit_failed"), "why": f"{type(exc).__name__}: {exc}", "sources": [], "captures": [], "boundaries": [], "ok": False})
+            return self._out({"kind": "anti_peep_audit", "headline": tr(self.lang, "audit_failed"), "why": error_text(self.lang, exc), "sources": [], "captures": [], "boundaries": [], "ok": False})
         payload["ok"] = True
         payload["dir"] = self.capture_dir
         return self._out(payload)
@@ -535,7 +546,7 @@ class HostSession:
                 if callable(extra):
                     item["payload"] = extra()
             except Exception as exc:  # noqa: BLE001 - 单个模块炸了不能拖垮整个界面
-                item["error"] = f"{type(exc).__name__}: {exc}"
+                item["error"] = error_text(self.lang, exc)
             plugins.append(item)
         return self._out({
             "kind": "tables",
@@ -725,7 +736,7 @@ class HostSession:
                 ]
             except Exception as exc:  # noqa: BLE001
                 info["notes"].append(
-                    tr(self.lang, "read_link_failed", error=f"{type(exc).__name__}: {exc}")
+                    tr(self.lang, "read_link_failed", error=error_text(self.lang, exc))
                 )
         return self._out(info)
 
@@ -743,7 +754,7 @@ class HostSession:
             try:
                 blocks.append(plugin.produce().render())
             except Exception as exc:  # noqa: BLE001
-                blocks.append(f"[error] {plugin.id}: {type(exc).__name__}: {exc}")
+                blocks.append(f"[error] {plugin.id}: {error_text(self.lang, exc)}")
         return "\n\n".join(blocks) if blocks else tr(self.lang, "no_output")
 
     def _render_text_en(self) -> str:
