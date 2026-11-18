@@ -45,6 +45,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--db", default=os.path.join(DEFAULT_DIR, "live.db"), help="SQLite 路径")
     parser.add_argument("--csv", default="", help="CSV 旁路路径（空=不写）")
     parser.add_argument("--no-store", action="store_true", help="不入库，只打印")
+    parser.add_argument(
+        "--gain-index",
+        type=int,
+        default=None,
+        help="固定前端增益档位（PHY 表索引，非 dB）。不同信道要横向比较就必须固定增益，"
+        "否则硬件 AGC 会把每个信道拉到相近电平，占用判断失去意义；不给则用硬件 AGC。",
+    )
     args = parser.parse_args(argv)
 
     registry, notes = build_registry()
@@ -54,6 +61,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     store = None if args.no_store else Store(args.db, csv_path=args.csv or None)
     try:
         link.open()
+        if args.gain_index is not None and not args.mock:
+            link.set_gain("MANUAL", args.gain_index)
         profiles = link.profiles()
         print(
             kv_block(
@@ -64,6 +73,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     ("传输", link.transport or "未知"),
                     ("能力", " ".join(link.caps) or "（未通告）"),
                     ("剖面", ", ".join(f"{fs/1e6:.0f}MS/s/{bins}bin" for fs, _c, bins, _s, _u, _cont in profiles) or "（无）"),
+                    ("增益", "硬件 AGC" if args.gain_index is None or args.mock else f"固定档位 {args.gain_index}"),
                     ("模块", ", ".join(f"{p.id}(w={p.slice_weight:g})" for p in registry.plugins)),
                 ],
             )

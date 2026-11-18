@@ -43,8 +43,8 @@ python -m unittest discover -s tests -t . -v    # 全量自测
 
 ```sh
 pip install pyserial
-python -m app.live --port COM5 --duration 30          # Windows
-python -m app.live --port /dev/ttyACM0 --duration 30  # Linux/macOS
+python -m app.live --port COM5 --duration 60 --gain-index 60  # Windows（固定增益才有可比性）
+python -m app.live --port /dev/ttyACM0 --duration 60 --gain-index 60
 python -m app.live --mock --duration 5                # 同一条代码路径的假固件版
 ```
 

@@ -65,7 +65,9 @@ cmd.exe //c "testing\idf-c5.bat flash"       # 只烧，不挂 monitor（monitor
 
 - 业务代码在 `examples/esp32c5-rf-monitor/`，只跑在电脑上。
 - 自测：`cd examples/esp32c5-rf-monitor && python -m unittest discover -s tests -t .`
-- 真机：`python -m app.live --port COM56 --duration 10`
+- 真机（WiFi 信道体检，横向比信道必须固定增益）：
+  `python -m app.live --port COM56 --duration 60 --gain-index 60`
+- 真机（随便跑跑 / 只看链路）：`python -m app.live --port COM56 --duration 10`
 - 假固件（不碰硬件）：`python -m app.live --mock --duration 5`
 
 ## 真机实测记录（2026-11-18，COM56 实板）
@@ -80,6 +82,19 @@ cmd.exe //c "testing\idf-c5.bat flash"       # 只烧，不挂 monitor（monitor
 - 刚调谐的头几帧增益未稳定，可能出现整段 0 码（噪声底读到 0），占用判决会失真。
 - 一次扫描失败会把链路置为 `failed`，调度器随后无退避地空转（实测出现过 1349405 次
   同类错误）——这是应用侧健壮性缺口，已记入待修清单。
+
+## 增益与判决口径（2026-11-18 补，实测得出）
+
+- **横向比较信道必须固定增益**：`GAIN MANUAL <index>`（`GAIN?` 回 `GAIN MANUAL 60 0 81 1`，
+  index 是 PHY 表索引，不是 dB）。硬件 AGC（`GAIN HARDWARE`）会把每个信道都拉到相近
+  电平（实测各信道 `p50` 全落 62~77），信道间差异被吃掉。
+- **实测定稿 index=60**：安静 5G 段 `p50≈28 / p95≈62`、忙 2.4G 段 `p50≈68`，全程无饱和；
+  index=50/70/80 与 60 不成单调关系（PHY 表分段校准），所以别"按 dB 直觉"调，要实测。
+- **判决不能用"高于噪声底的 bin 比例"**：实板同一帧内噪声底自身抖动 ±10~18 dB
+  （功率码 `20*log10(Q15)` 只有 6 dB 一格），任何绝对门限都会把纯噪声判成忙
+  （实测 2.4G/5G 全部 100% 忙）。现在判「信道中位电平比本频段最安静信道高多少 dB」：
+  `8/15/25 dB ⇒ 轻度/拥挤/重度`，安静环境全归零，有 AP 的信道 +20~+40 dB。
+- 20 MS/s 窗（±10MHz）整窗都是有效通带；80 MS/s 窗边缘约 60% 是 0 码，不能用来判占用。
 
 ## 边界
 

@@ -127,7 +127,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print()
                 print(output.render())
     print(f"\n端到端演示完成，用时 {fmt_duration(time.time() - started)}。")
-    print("下一步：确认阶段 0 后按 todo.md 开 feat/1-wifi-check（STOP 门禁未过不许写功能代码）。")
+    print("下一步：真机跑一遍同名场景（python -m app.live --port COM56 --duration 60 --gain-index 60）。")
     return 0
 
 
