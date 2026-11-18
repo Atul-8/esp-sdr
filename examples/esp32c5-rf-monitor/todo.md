@@ -14,10 +14,13 @@
 | --- | --- | --- | --- |
 | 0 | `feat/0-foundation` | `core/` 地基 + mock/假固件 + 43 条自测 | `[REVIEW]` 待人类验收 |
 | 1 | `feat/1-wifi-check` | WiFi 信道体检 | `[TODO]` |
-| 2 | `feat/2-waterfall` | 频谱瀑布图 | `[TODO]` |
+| 2 | `feat/2-waterfall` | 频谱瀑布图（PNG + HTML 翻页） | `[REVIEW]` 待人类验收 |
 | 3 | `feat/3-ble-risk` | BLE 风险与环境评估 | `[TODO]` |
 | 4 | `feat/4-guard-58g` | 5.8G 频段守卫 | `[TODO]` |
 | 5 | `feat/5-capture` | 可疑信号抓拍（含分类器） | `[TODO]` |
+
+> 本分支（`feat/2-waterfall`）从阶段 0（`1f36a4e`）切出，是独立 worktree：
+> 阶段 1 的成果在 `feat/1-wifi-check`、上位机在 `feat/host-gui`，所以本文件里它们仍显示 `[TODO]`。
 
 ---
 
@@ -52,11 +55,51 @@
 - 产出：2.4G/5G 各信道占用条形图、推荐信道、干扰源计数、时间序列。
 - 判据：同一批 mock 快照下，推荐信道与 `wifi_busy` 场景注入的忙信道一致。
 
-## [TODO] 2. 频谱瀑布图（feat/2-waterfall）
+## [REVIEW] 2. 频谱瀑布图（feat/2-waterfall）
 
-- 只加 `modes/waterfall.py`（+ 自己的渲染实现）。
-- 产出：时间-频率图（ASCII 起步，PNG 需先确认依赖）、时间窗查询（复用 `Store.iter_between`）。
-- 判据：把 `video_58g` 场景渲出来，5740MHz 处必须是一条连续亮带。
+- 只加 `modes/waterfall.py` + 自己的渲染（`output/png.py` `output/heatmap.py`）+ `app/waterfall.py`。
+- 产出：时频热力图（PNG 774×376 每页 + `index.html` 翻页 + HTML 页内导航），
+  横轴频率（等宽、各自刻度）、纵轴时间（**一行 = 一轮轮扫 ≈ 4.4 s**），页时长 300 s。
+- 判据：mock 跑 10 分钟出图，**能肉眼分辨 WiFi 突发块与微波炉宽带噪声** → 见下表实测。
+
+验收材料（`docs/02-waterfall.md` 有完整版）：
+
+```bash
+python -m unittest discover -s tests -t .        # Ran 82 tests / OK
+python -m app.waterfall --minutes 10 --scenario microwave --db .data/wf/microwave.db --out .data/wf/microwave --ascii
+python -m app.waterfall --minutes 10 --scenario mixed     --db .data/wf/mixed.db     --out .data/wf/mixed     --ascii
+python -m app.waterfall --render-only --db .data/wf/mixed.db --out .data/wf/mixed   # 只重渲染
+```
+
+实测输出（本机 Python 3.12.10，mock 虚拟时间）：
+
+| 验收项 | 判据 | 结果 |
+| --- | --- | --- |
+| 自测全绿 | `unittest` 0 失败 | ✅ 82 passed（新增 `test_png` 10 / `test_heatmap` 15 / `test_waterfall` 14） |
+| 轮扫覆盖 | 三频段首尾压边、步进 ≤ 15 MHz、相邻窗重叠 | ✅ 2.4G 6 窗 / 5G LOW 13 / 5G HIGH 25，共 **44 窗一轮** |
+| 快照顺路入库 | 10 分钟 mock 入库帧数 == 生成帧数 | ✅ 5984 / 5984，`source_errors 0` |
+| 分页不丢帧 | 10 分钟 → 2 页，页帧数之和 == 总数 | ✅ 3036 + 2948 = 5984 |
+| PNG 合法且保真 | 尺寸/颜色类型正确，**像素与矩阵逐行一致** | ✅ 774×376 / RGB8；逐行比对测试通过 |
+| 微波炉宽带 | 连续抬升 ≥ 40 MHz | ✅ 2430–2483.5 连续（ASCII `====`） |
+| WiFi 突发块 | 窄（< 30 MHz）+ 时间轴有暗行 | ✅ 2432–2442，min 22 / max 137 |
+| 无假信号 | `quiet` 不出现连续亮带 | ✅ `runs_above(p50+8)` 为空 |
+| 边界声明 | 「周期快照，非连续实时」+「相对码不是 dBm」 | ✅ PNG 页眉 / HTML banner / 页脚 / CLI 四处 |
+
+产物（`examples/esp32c5-rf-monitor/.data/wf/`，不入库）：
+
+```text
+microwave/waterfall-p1.png  774×376  124,975 B     mixed/waterfall-p1.png  774×376  131,932 B
+microwave/index.html        2.3 KB                 mixed/index.html        2.3 KB
+microwave/waterfall-p1.html 2.9 KB                 mixed/waterfall-p1.html 2.9 KB
+```
+
+未覆盖（诚实标注）：
+
+1. **没上真机跑瀑布图** —— 本分支只做宿主侧，`app.waterfall` 目前只有 mock 源；
+   真机数据同样进 `Store`，接口一致但**未实测**。
+2. **虚拟时间**：10 分钟数据 40~50 s 生成，时间轴是等效时间不是墙钟（产出物已注明）。
+3. **mock 逐 bin 抖动**：`SpectrumSynthesizer._is_on()` 按 bin 掷骰子，图上噪点感是 mock 特性。
+4. **上位机还没有瀑布图页**：`host/` 在 `feat/host-gui` 分支，本分支从阶段 0 切出无 `host/`。
 
 ## [TODO] 3. BLE 风险与环境评估（feat/3-ble-risk）
 
@@ -79,7 +122,9 @@
 
 ## 阻塞与需求
 
-- （无）
+- `core/scheduler.py` 失败重试/退避：一次扫描失败把链路置 `failed` 后无退避空转
+  （实测 1349405 次同类错误）。修它要动 `core/`，等人类裁决（任务 2 未依赖此修复）。
+- 固定增益是否做自动标定（当前靠人工 `--gain-index 60`）：属应用层，等人类裁决。
 
 ## 约定
 

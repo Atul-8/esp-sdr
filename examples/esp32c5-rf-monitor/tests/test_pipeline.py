@@ -15,8 +15,8 @@ class PipelineTests(unittest.TestCase):
         tmp = tempfile.mkdtemp(prefix="c5mon-pipe-")
         db = os.path.join(tmp, "pipe.db")
         csv_path = os.path.join(tmp, "pipe.csv")
-        registry = discover("modes")
-        self.assertEqual(len(registry), 0, "阶段 0 的 modes/ 必须为空，功能由分支各自添加")
+        # 全链路用测试替身，不用真实 modes/（功能分支会往里加模块）。
+        registry = Registry()
         for plugin_id, weight in (("wifi_check", 4.0), ("ble_risk", 3.0), ("guard_58g", 2.0), ("capture", 1.0)):
             registry.register(make_plugin(plugin_id, weight))
         source = MockSource(scenario="mixed", realtime=False, frames_per_scan=2)
