@@ -28,14 +28,15 @@ examples/esp32c5-rf-monitor/
 │   ├── format.py         #   表格/单位格式化
 │   ├── png.py            #   零依赖 PNG 编码器 + 5×7 点阵（任务 2）
 │   └── heatmap.py        #   时频热力图 PNG + HTML 翻页（任务 2）
-├── tests/                # mock 快照源（9 场景）+ 假固件 + 无硬件自测
+├── tests/                # mock 快照源（10 场景）+ 假固件 + 无硬件自测
 ├── testing/              # 手工实测/自证脚本（不进单测）：
 │                         #   guard_replay（往真板数据注入图传）/ capture_real（真板抓档）
-│                         #   scenario_matrix（9 场景 × 4 模块）/ capture_replay（判据回放 7 例）
+│                         #   scenario_matrix（10 场景 × 4 模块）/ capture_replay（判据回放 7 例）
+│                         #   anti_peep_sim（反偷拍整场仿真：缺实物时自证「能发现」）
 ├── app/                  # demo（mock 全链路）/ live（真机·假固件）/ waterfall（瀑布图 CLI）
 │                         # capture_link（抓档只在两次扫描之间落地）/ audit（一分钟体检报告）
 ├── host/                 # 图形上位机（PySide6 + WebView）：换实验只换网页
-├── docs/                 # 阶段说明、任务书副本、验收记录
+├── docs/                 # 阶段说明（00~05）+ 06-integration（五合一总验收报告）
 └── todo.md               # 唯一任务事实源
 ```
 
@@ -59,7 +60,7 @@ python testing/guard_replay.py --db .data/guard.db      # 回放注入自证：�
 python -m app.demo --scenario unknown_cw_clean --duration 12   # 干净环境里一个窄带持续源
 #   产出：抓档清单（频点/样本/位宽/分类/置信度/存档路径）+ 四道过滤计数
 python -m testing.capture_replay                               # 判据自证：7 个用例过四道门
-python -m testing.scenario_matrix                              # 9 场景矩阵（含 5.8G 共享/单跑双列）
+python -m testing.scenario_matrix                              # 10 场景矩阵（含 5.8G 共享/单跑双列）
 python -m app.audit --mock --scenario mixed --duration 30      # 体检报告（真板去掉 --mock）
 #   真板：python -m app.audit --port COM56 --duration 60 --gain-index 60 --db .data/audit/real.db
 #   边界：「已存证」≠「确认是摄像头」；杂散只报清单不抓；抓档只收 unknown

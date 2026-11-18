@@ -19,6 +19,7 @@
 | 4 | `feat/4-guard-58g` | 5.8G 频段守卫 | `[REVIEW]` 待人类验收（13 窗滑扫 + 五类判词 + 告警日志 + 事件落库；真板空环境 1 条杂散 + 回放注入自证） |
 | 5 | `feat/5-capture` | 可疑信号抓拍（含分类器） | `[REVIEW]` 待人类验收（四道门 + 真板 4 根杂散报清单不抓 + 3 条存证 + 抓档页/一键体检/场景矩阵 9/9 + 判据回放 7/7） |
 | T | `feat/host-gui` | 图形上位机（WebView，跨阶段工具，不占功能阶段） | `[REVIEW]` 待人类验收（含双击弹出预览 + 高度自适应 + 真全屏 + 独立窗口 + 2D 瀑布频率轴 + 周期瀑布图页 + 抓档页 + 一键体检） |
+| 6 | `integration` | 五合一合并 + 总验收报告 + tag `v1.0.0` | `[REVIEW]` 待人类整体验收（六步合并逐个跑单测 58→271、矩阵 10/10、判据回放 7/7、整场仿真 OK、自检 44 checks 全绿） |
 
 ---
 
@@ -287,7 +288,7 @@ microwave/waterfall-p1.html 2.9 KB                 mixed/waterfall-p1.html 2.9 K
   （假固件用，三种「长相」`cw/wideband/burst` 按场景选，存档 IQ 本身带场景特征）。
 - `app/audit.py`：一分钟体检报告（`python -m app.audit --port COM56`）+ **只读当前会话**的
   `summary()`（上位机「一键体检」用，不重扫、不新抓，`done` 永远 `False`）。
-- `testing/capture_real.py`：真板抓档实测脚本；`testing/scenario_matrix.py`：9 场景 × 4 模块矩阵；
+- `testing/capture_real.py`：真板抓档实测脚本；`testing/scenario_matrix.py`：场景 × 4 模块矩阵（阶段 5 时 9 场景，阶段 6 加入 `hotel_scan` 后 10 场景）；
   `testing/capture_replay.py`：合成快照过四道门（判据自证，不依赖实物）。
 - `docs/05-capture.md`：判据推导、四道门、真板实测、边界与未验证项。
 
@@ -300,7 +301,7 @@ microwave/waterfall-p1.html 2.9 KB                 mixed/waterfall-p1.html 2.9 K
 | `quiet` 不抓 | 0 条 + 0 触发 | ✅ `caps 0 / trig 0` |
 | 环境饱和不抓 | `wifi_busy` 抓 0 条 | ✅ `skipped_busy 81`、`caps 0` |
 | 本机杂散报清单不抓 | `mixed` 出现 `spurs[]` 条目且 `skipped_spur > 0` | ✅ `skipped_spur 41`，`spurs[]` 逐根列 2455/2465/2427/2468 MHz |
-| 场景矩阵 | `python -m testing.scenario_matrix` 9 场景全 PASS | ✅ 9/9 PASS（含 5.8G「共享/单跑」双列） |
+| 场景矩阵 | `python -m testing.scenario_matrix` 场景全 PASS | ✅ 9/9 PASS（当时 9 场景；阶段 6 加 `hotel_scan` 后 **10/10**） |
 | 判据自证 | `python -m testing.capture_replay` 7 用例全符合预期 | ✅ 7/7 PASS（clean_cw→抓；pure_spur→杂散；short_span→跨度门；crowded→饱和门；weak_narrow / edge_clipped→不抓；wideband_known→判 microwave 故不抓） |
 | 真板 CAP20 | 样本数 / 线上字节 / 存档字节三方自洽 + sha256 一致 | ✅ 16380 样本 = 979 µs @ 20 MS/s；线上 **40950 B**；存档 **65520 B**；`sha256` 一致；分类 `unknown 0.65` |
 | 上位机抓档页 | 表格 ≥1 行 / 过滤档 ≥7 / 门槛 ≥10 / 说明 ≥3 / 边界条 >30 字 / 探针 kind | ✅ `rows 1 / filters 7 / thresholds 16 / notes 13 / warn 175 / probe.kind capture / span > 0` |
@@ -447,6 +448,68 @@ epo\examples\esp32c5-rf-monitor`；`ESPSDR_SRC=/tmp` 正确抛错 |
 - `wifi` 页每次表格刷新都重建 38 行 DOM（1 Hz，实测无卡顿）；若以后行数上千要改 diff 渲染。
 - 3D 柱状图每次刷新重建 mesh（≤38 个），切页时未复用；暂时够用。
 
+## [REVIEW] 6. 五合一合并（integration）
+
+**开工依据**：人类 2026-11-20 裁决「没有的就做模拟仿真，没问题就合并」→ 授权做阶段 6。
+
+### 缺正样本的地方怎么补
+
+任务 4/5 的验收标准都含「真来了要抓到」，但手上没有真的 5.8G 图传、也没有真偷拍摄像头。
+按人类裁决**用仿真补**，新增 `testing/anti_peep_sim.py`（三阶段）：
+
+| 阶段 | 数据 | 模块 | 实测结果 |
+| --- | --- | --- | --- |
+| 1 | `video_58g` 场景（5.8G 模拟图传：宽平顶 + 载波） | 只跑 `guard_58g`（独占射频 260 片） | `analyses 131` → **告警 1 条**（5741 MHz / 2.7 MHz / 107 s） |
+| 2 | `unknown_cw_clean` 场景（2.4G 干净处一根窄带未知源） | 只跑 `capture`（独占射频 240 片） | `triggers 275` → **抓档 2 条**（2454 MHz） |
+| 3 | 两阶段产出合流 | `app.audit.verdict()` | 「发现可疑信号并已抓档」+「这不是确认是摄像头」 |
+
+断言 6 项全 `true`：`guard_alerts` / `guard_analyzed` / `capture_taken` / `capture_triggered` /
+`verdict_not_empty` / `verdict_not_overclaim`。新增 mock 场景 `hotel_scan`（整场：5.8G 图传 + 2.4G 隐藏源 + 普通 WiFi/BLE 背景），
+矩阵里只验「在算 + 不误炸」，「能发现」交给上面的独占跑法 —— 共享单射频时两个模块都攒不够帧，
+这是设计代价不是 bug（同样处理过 `video_58g`）。
+
+**边界（写死在脚本和报告里）**：仿真是合成信号，不是实物；证明的是「判据在这类形状上会响」，
+不能证明「真摄像头波形一定长这样」。有实物后应补一条真信号实测，脚本继续当回归。
+
+### 合并记录（按任务书 1→2→3→4→5 顺序，每合一次跑一次全量）
+
+| 步 | 合入 | 冲突 | 合完单测 |
+| --- | --- | --- | --- |
+| 1 | `feat/1-wifi-check`（连带阶段 0 地基，因为阶段 0 未单独进 main） | 无 | **58 OK** |
+| 2 | `feat/2-waterfall` | `todo.md` 阶段表、`tests/test_registry.py` 注释 | **97 OK** |
+| 3 | `feat/3-ble-risk` | 同上两处 | **130 OK** |
+| 4 | `feat/4-guard-58g` | `todo.md` 阶段表 + 阻塞条目 | **186 OK** |
+| 5 | `feat/5-capture` | 无 | **271 OK** |
+| 6 | `feat/host-gui`（跨阶段工具 T） | 无（内容已等价） | **271 OK** |
+
+冲突处理**只动冲突行、不改逻辑**：阶段表按两侧实际进度合并、注释取信息更全的一句、
+阻塞条目取验收摘要更全的一侧。合完后 `git diff feat/host-gui -- examples/esp32c5-rf-monitor`
+**为空** —— integration 的代码内容 == 已验收过的 `feat/host-gui`，没有引入任何新逻辑。
+
+### 合流验证（全部在 integration 分支上实跑）
+
+| 项 | 命令 | 实测结果 |
+| --- | --- | --- |
+| 全量单测 | `python -m unittest discover -s . -p "test_*.py"` | **271 tests OK**（53.6 s） |
+| 场景矩阵 | `python -m testing.scenario_matrix --slices 240` | **10/10 PASS** |
+| 判据回放 | `python -m testing.capture_replay` | **7/7 PASS** |
+| 整场仿真 | `python -m testing.anti_peep_sim` | **三阶段 OK**（告警 1 + 抓档 2） |
+| 上位机自检 | `cd host && python app.py --selftest --seconds 10` | **`ok:true` / 44 checks 全绿 / `fail:[]`** |
+| 时间片配比 | 同上 `share` | waterfall 0.201 / wifi 0.198 / ble 0.201 / guard 0.201 / capture 0.201（公平 5×20%） |
+| 窗口缩放 | 同上 `layout` | 4 档（1280×800 / 1024×680 / 900×620 / 760×560）全 `ok:true`、`bad:[]` |
+
+产物：`docs/06-integration.md`（总验收报告）、tag **`v1.0.0`**（annotated）。
+
+### 合流后的边界（不变，必须随结论一起说）
+
+1. 周期快照 ≠ 连续实时：同一时刻只有一个频段在被扫，抓档期间射频停扫；
+2. 功率码是**相对 dB 码**，不是 dBm，跨增益不可比；
+3. 单射频分时共享：5 个模块各 20% 时间片，单模块灵敏度低于独占（5.8G 告警在共享跑法下会漏，见双列表）；
+4. 分类器是启发式的（只看带宽/持续/占空比），不做调制识别、不做设备级归因；
+5. 「未抓到」≠「房间里没有摄像头」：看不到离线存储型设备、看不到非 ISM 频段。
+
+---
+
 ## 阻塞与需求
 
 - **应用侧健壮性缺口**（真机实测暴露，属 `core/scheduler.py`）：一次扫描失败会把链路
@@ -466,8 +529,10 @@ epo\examples\esp32c5-rf-monitor`；`ESPSDR_SRC=/tmp` 正确抛错 |
 - **阶段 4 正样本缺口**（需要实物才能闭合）：没有真实 5.8G 图传/模拟摄像头，
   抓得到只能靠 `testing/guard_replay.py` 往真板数据里注入信号自证；
   有实物（哪怕一个 5.8G 无线摄像头）时可补一条真信号实测，把「抓到」从注入证据升级为实物证据。
-- **阶段 4/5 是否放行**：阶段 4 `feat/4-guard-58g` 已交 `[REVIEW]` 材料、阶段 5 `feat/5-capture` 仍是 `[TODO]`；
-  按 docx 的硬 STOP 规则应等人类「确认完成」阶段 0~3 后再开工。
+- ~~阶段 4/5 是否放行~~：人类已授权「没有的就做模拟仿真，没问题就合并」→ 阶段 4/5 已交材料、
+  阶段 6 合并已完成，**已解除**。
+- **阶段 1~5 + T + 6 全部 `[REVIEW]`**：等人类整体验收（一次性给「确认完成」即可，可分批）。
+  未确认前**不打远端 tag、不动 `main`**（`main` 仍等于上游 `3ab3b65`）。
 
 ## 约定
 
