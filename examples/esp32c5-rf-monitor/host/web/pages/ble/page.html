@@ -1,0 +1,99 @@
+<div class="warn-box" id="ble-warn" hidden></div>
+
+<div class="cards" id="ble-cards">
+  <div class="card">
+    <div class="card__label" data-i18n="ble.card.risk">风险类型</div>
+    <div class="big-risk" id="risk-type">—</div>
+    <div class="card__note" id="risk-note" data-i18n="ble.card.wait">等待样本</div>
+  </div>
+  <div class="card">
+    <div class="card__label" data-i18n="ble.card.wideband">宽带占用</div>
+    <div class="card__value" id="wideband">—</div>
+    <div class="card__note" id="wideband-note">—</div>
+  </div>
+  <div class="card">
+    <div class="card__label" data-i18n="ble.card.contrast">开关幅度</div>
+    <div class="card__value" id="contrast">—</div>
+    <div class="card__note" id="contrast-note">—</div>
+  </div>
+  <div class="card">
+    <div class="card__label" data-i18n="ble.card.adv">广播活动</div>
+    <div class="card__value" id="adv-activity">—</div>
+    <div class="card__note" id="adv-note">—</div>
+  </div>
+  <div class="card">
+    <div class="card__label" data-i18n="ble.card.data">数据区占用</div>
+    <div class="card__value" id="data-band">—</div>
+    <div class="card__note" id="data-note">—</div>
+  </div>
+</div>
+
+<div class="panel">
+  <div class="panel__head">
+    <span class="panel__title" data-i18n="ble.ev.title">证据链（判词就是按这张表逐条走的）</span>
+    <span class="panel__hint" id="ble-sample" data-i18n="ble.card.wait">等待样本</span>
+  </div>
+  <div class="panel__body">
+    <table class="chtable">
+      <thead>
+        <tr>
+          <th data-i18n="ble.ev.item">项目</th>
+          <th data-i18n="ble.ev.value">读数</th>
+          <th data-i18n="ble.ev.verdict">是否成立</th>
+        </tr>
+      </thead>
+      <tbody id="ev-rows"><tr><td colspan="3" class="muted" data-i18n="ble.waitData">还没有数据：点顶部「开始」</td></tr></tbody>
+    </table>
+  </div>
+</div>
+
+<div class="panel">
+  <div class="panel__head">
+    <span class="panel__title" data-i18n="ble.table.title">BLE 广播信道（按活动降序）</span>
+    <span class="panel__hint" data-i18n="ble.table.hint">活动 = 命中帧占比；比底噪 = 本通道 p80 比本帧底噪高多少；窄带突出 = 比肩部高多少</span>
+  </div>
+  <div class="panel__body">
+    <table class="chtable">
+      <thead>
+        <tr>
+          <th data-i18n="ble.col.channel">通道</th>
+          <th data-i18n="ble.col.center">中心</th>
+          <th data-i18n="ble.col.coverage">覆盖</th>
+          <th data-i18n="ble.col.activity">活动占空</th>
+          <th data-i18n="ble.col.bar">占空条</th>
+          <th data-i18n="ble.col.excess">比底噪</th>
+          <th data-i18n="ble.col.prominence">窄带突出</th>
+          <th data-i18n="ble.col.peak">峰值码</th>
+          <th data-i18n="ble.col.level">判定</th>
+        </tr>
+      </thead>
+      <tbody id="ble-rows"><tr><td colspan="9" class="muted" data-i18n="ble.waitData">还没有数据：点顶部「开始」</td></tr></tbody>
+    </table>
+  </div>
+</div>
+
+<div class="panel">
+  <div class="panel__head">
+    <span class="panel__title" data-i18n="ble.3d.title">3 个广播信道对比（3D）</span>
+    <span class="panel__hint" data-i18n="ble.3d.hint">高度 = 相对底噪抬升；颜色 = 分档；鼠标可旋转</span>
+  </div>
+  <div class="panel__body" id="ble-3d" style="height: 240px;"></div>
+</div>
+
+<div class="panel">
+  <div class="panel__head">
+    <span class="panel__title" data-i18n="ble.wifi.title">2.4G 在用信道（重叠判读）</span>
+    <span class="panel__hint" data-i18n="ble.wifi.hint">占用比例判「在用」，不用电平：窄带脉冲只占 2/18 ≈ 11%</span>
+  </div>
+  <ul class="notes" id="ble-wifi"><li class="muted" data-i18n="ble.card.wait">等待样本</li></ul>
+</div>
+
+<div class="panel">
+  <div class="panel__head"><span class="panel__title" data-i18n="ble.hints.title">判读与建议</span></div>
+  <ul class="notes" id="ble-hints"><li class="muted" data-i18n="ble.card.wait">等待样本</li></ul>
+</div>
+
+<div class="panel">
+  <div class="panel__head"><span class="panel__title" data-i18n="ble.notes.title">判据与边界</span></div>
+  <ul class="notes" id="ble-notes"><li class="muted" data-i18n="ble.card.wait">等待样本</li></ul>
+</div>

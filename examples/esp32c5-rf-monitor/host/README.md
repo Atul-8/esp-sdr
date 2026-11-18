@@ -41,15 +41,17 @@ host/
 cd examples/esp32c5-rf-monitor
 
 # 1) 真板（COM56 是这块板子的硬规则，见仓库根 AGENTS.md）
-python host/app.py --port COM56 --gain-index 60
+python host/app.py --port COM56 --gain-mode MANUAL --gain-index 60
+python host/app.py --port COM56 --gain-mode AUTO   --gain-target 4.0   # 主机闭环自己压底噪
+python host/app.py --port COM56 --gain-mode HARDWARE                   # 固件硬件 AGC
 
 # 2) 没板也能看：假固件 + 内置场景
 python host/app.py --mock --scenario wifi_busy
 
-# 3) 无人工干预自检（跑 8s → 切四个页面截图 → 打印 JSON 报告 → 退出码 0/2）
+# 3) 无人工干预自检（跑 8s → 走完五个页面 + 增益控件 → 打印 JSON 报告 → 退出码 0/2）
 python host/app.py --selftest --seconds 8 --shot out.png
 python host/app.py --selftest --real --port COM56 --gain-index 60 --seconds 12
-#    → 报告末尾 "checks": 29 项全 true，退出码 0（假固件与真板都验过）
+#    → 报告末尾 "checks": 40 项全 true，退出码 0（假固件与真板都验过）
 
 # 逻辑层自测（不开窗口）
 python -m unittest discover -s host/tests -t . -v
@@ -195,6 +197,78 @@ JS → Python 的入口：`listPorts()`、`scenarios()`、`renderText()`、
 `openFile(path)`（只在系统浏览器打开 `.data/` 下的产物，其它路径直接拒）、
 `uiReport(json)`（都在 `bridge.js` 里封装成 Promise）。
 
+## 增益调控（顶栏三段 + 自动闭环，`host/gain.py`）
+
+顶栏 `AGC | 手动 | 自动` 三段按钮 + `− 档号 +` 步进 + `目标` 输入框，作用的是
+**真固件命令**，不是界面滤镜：`GAIN HARDWARE` / `GAIN MANUAL <index>`。
+index 是 **PHY 表项**，既不等于 dB 也不线性。
+
+三种模式各有各的用途，别混：
+
+| 段 | 固件命令 | 干什么用 | 什么时候用 |
+|---|---|---|---|
+| AGC | `GAIN HARDWARE` | 固件自己挑档 | 只想知道「这段有没有信号」 |
+| 手动 | `GAIN MANUAL n` | 钉死一档 | **横向比较必须固定档位**（占用率会随增益走） |
+| 自动 | 主机闭环 | 每轮把底噪压到 `target` | 环境噪声漂了、想省掉人工试档 |
+
+### 实板实测：档位 → 底噪（2440 MHz，每档一轮 35~40 帧取 p10 中位数）
+
+```
+  0~30 档 : 底噪 0.0 码                      → 动态范围被压死，什么都看不见
+ 35~45 档 : 6.0 / 6.0 / 8.5 码
+ 50~65 档 : 25.0 / 22.0 / 31.0 / 24.5 码      → 局部不单调，别指望一档一码
+ 70~81 档 : 30.3 / 47.0 / 51.5 / 63.0 码
+```
+
+跨度 63 码。所以：**同一张表里横向比数字，先看档位；档位不同，数字不可比。**
+
+档位上限不是写死的：开机问一次固件 `GAIN?`（实板回 `GAIN MANUAL 60 0 81 1`），
+拿它报的 `[min, max]` 覆盖兜底范围。写死 90 会给出「界面调了、固件不认」的档位。
+
+### 自动闭环怎么算（`GainControl`）
+
+- 控制量 = **一轮里所有帧 `bins_db` 的 p10 中位数**，再对轮之间做指数平滑
+  （`AUTO_SMOOTH=0.4`）。**不是单帧**：实测同档同频点连扫 14 轮，单帧 p10 在
+  **0 ~ 73 码**之间跳 —— 拿单帧当控制量就是在拿噪声追噪声。
+- 一轮只决策一次（`GainAwareSource.scan()` 的 `finally` 里 `end_scan()`）。
+- 死区 `AUTO_TOLERANCE=1.5` 码，步进 `AUTO_STEP=2` 档，热身 `AUTO_WARMUP=2` 轮。
+- **节奏只由 `AUTO_CONFIRM=2`（连续两轮同方向越界）决定，不用墙上时间做冷却**：
+  第一版写了 `AUTO_COOLDOWN_S=1.2`，而实板一轮约 1.1 s，于是每一轮都被冷却卡住，
+  真板上 14 轮只动了一档 —— 闭环看着在跑，其实停摆。
+- 单帧 p10 = 0（没扫到 / 全零）的帧不进控制量（`DEGENERATE_FLOOR`）：实板这种帧很常见，
+  拿它当控制量会把档位往错误方向推。
+- `--mock` 下不跑闭环：假固件的 `GAIN` 是空转，调档只会给用户看假动作。
+
+真板实测（起始 60 档、目标 8 码、14 轮）：`60 → 58 → 56 → 54 → 52 → 50 → 48`，
+平滑底噪 `39.0 → 14.4`，每两轮动一档，方向一直朝目标。
+
+### 线程纪律（踩过）
+
+`GAIN` 命令只能在**两次扫描之间**发。扫描中途插一条命令，串口读缓冲会被上一轮
+残留的二进制打乱，下一次 `scan()` 直接抛 `SPEC 启动回复异常：['\x00\x00…']`。
+所以 GUI 线程只往 `GainControl` 里塞意图，真正下发在 `GainAwareSource.scan()` 开头。
+
+自检里对应 5 项：`gain_manual`（点「手动」）、`gain_step`（点 `+` 档号 +1）、
+`gain_auto`（点「自动」→ `mode == "AUTO"`）、`gain_on_button`（按钮高亮集合 == `["AUTO"]`）、
+`gain_readback`（`#gain-read` 里出现「底噪」字样）。
+
+## BLE 风险评估页（`pages/ble/`）
+
+数据来自 `modes/ble_risk.py` 的 `ble_report()`（`tables` 信号推送，`kind == "ble_risk"`）。
+页面结构：告警条 → 5 张判定卡（判词 / 宽带 / 开关幅度 / 广播活动 / 数据信道）→
+6 行证据链 → 9 列广播信道表 → 3D 信道柱 → 2.4G 在用信道 → `hints` / `notes` 原文，
+外加 `#ble-sample` 存一份完整 payload 供排查。
+
+- **门槛全部从 `payload.thresholds` 取**（`presence_db`、`narrow_ratio`、`contrast_db`、
+  `light_ratio`、`min_adv_frames`、`headroom_codes`、`wideband_frac`、`wifi_busy_fill`…），
+  前端**一个判据数字都不许写死**：改判据只改模块，网页跟着走。
+- **判词不翻**：`risk_type` / `hints` / `notes` 一律显示模块给的中文原文，
+  翻了就跟 `python -m app.live` 的 CLI 输出对不上。
+- `2.4G 在用信道` 用 `wifi_channels()` 的 `fill`（0~1 占用比例）判「在用」，
+  再拿 `payload.overlap` 里 `fraction >= 0.9` 标「硬冲突」；不用电平判在用。
+- 自检 6 项：`ble_rows`（≥3 行）、`ble_risk`、`ble_evidence`（≥6 行）、`ble_hints`、
+  `ble_notes`、`ble_bars3d`。
+
 ## 周期瀑布图页（`pages/waterfall/`）
 
 数据来自 `modes/waterfall.py` 的 `web_payload()`（经 `tables` 信号 1 Hz 推送，
@@ -227,7 +301,8 @@ JS → Python 的入口：`listPorts()`、`scenarios()`、`renderText()`、
 - **周期快照，非连续实时**：帧与帧之间有接收空档，瀑布是"离散时间片堆叠"。
 - **功率码是相对 dB 码（0..255），不是 dBm**；纵轴标注写的就是"功率码"。
 - **固定增益才有可比性**：跨信道比较前先钉 `--gain-index 60`；界面上 `硬件 AGC`
-  和 `固定档 N` 分开显示，不混着比。
+  和 `固定档 N` 分开显示，不混着比。自动闭环把底噪压到同一目标也算「固定基准」，
+  但它每轮可能微调一档，跨会话对比仍然要记下当时档位。
 - **分类是启发式**：WiFi 体检只说"相对抬升多少 dB"，不说"这里一定是 WiFi"。
 - 页面里的"推荐信道"直接取自 `modes/wifi_check.py` 的 `web_payload()`，前端
   **不做二次判定**，保证界面和 `python -m app.live` 的结论一致。
@@ -249,6 +324,10 @@ JS → Python 的入口：`listPorts()`、`scenarios()`、`renderText()`、
 | 独立窗口里画面空白/不刷新 | 新窗口晚连上，`QWebChannel` 之前的信号全丢了 | `runtime()` 带回最后 `spectrum`/`tables`，`syncRuntime()` 直接回放；`HostWindow` 缓存两份 JSON |
 | 点自检必崩：`Windows fatal exception: stack overflow`，exit=127，**没有 Python 回溯**，主线程停在 `app.exec()` | `finish()` 是模块级函数 `run_selftest(...)` 里的闭包，里面误用了 `self.session` / `self.runner`：`self` 在该作用域根本不存在 → `NameError` 在 Qt 回调里抛出，PySide6 直接进程级栈溢出。包在 `try/except` 里的那半段更阴——异常被吞掉，`share` 一直是 `{}` | 闭包里一律 `window.xxx`；**别在主线程读正在跑的 `QThread` 实例属性**，用窗口持有的普通 dict（`stats_box`）中转收集线程的数据 |
 | 瀑布图页「没数据」但后端在读射频：一轮 4.4 s 实际走了 5 分钟 | `slice_weight` 悬殊（`wifi_check=40.0` vs `waterfall=0.8`），平滑加权轮询把射频几乎全给了 wifi，share 实测 `{waterfall: 0.016}` | 单射频共享要**公平配比**：两边都 `slice_weight = 1.0`（各半），selftest 的 `share`/`waterfall_share` 项守着（实测 0.5 / 0.5） |
+| 扫频进度条上 5G 整段消失、`visited` 只到 5 | 进度条跟了「字典序第一个」计划，`ble_risk` 只扫 2.4G 8 窗 | 取**跨度最宽**的计划（`widestPlan()`，并列按 id 排序），不是第一个 |
+| 界面点「自动」后档位纹丝不动 | `AUTO_COOLDOWN_S=1.2` 比一轮扫描（约 1.1 s）还长，每轮都被冷却拦掉 | 节奏改用「连续 `AUTO_CONFIRM` 轮同方向越界」，与扫描耗时解耦 |
+| 自动闭环偶尔把档位往错方向推 | 单帧 p10 = 0（没扫到）被当成「底噪太低」 | `DEGENERATE_FLOOR` 丢弃这类帧；控制量取一轮中位数 + 指数平滑 |
+| `GAIN` 之后下一次 `scan()` 抛 `SPEC 启动回复异常` | 命令插在扫描中途，或上一轮帧没读完就 break | 命令只在 `GainAwareSource.scan()` 开头落地；读循环不许半路 break |
 | 多模块同时跑时，扫频进度条游标乱跳、`visited` 一直是 1 | 页面每收到一帧就按 **该帧所属模块** 重设计划，计划在 `waterfall`/`wifi_check` 之间来回换，`visited` 每帧被清空 | 进度条**只跟一个模块**的计划（`planModule` 固定首个计划），只喂匹配模块的帧 |
 | 20 MHz 窗 / 15 MHz 步进下，进度条覆盖数涨得极慢 | 窗是**重叠**的，相邻格最近匹配会前后抖；「索引变小 = 换轮」被抖动误判成换轮，反复清空 `visited` | 换轮判据加幅度门槛：只有「跳回大半张图」（`index - found > plan.length / 2`）才算换轮 |
 | 网页报错查不到 | 默认不打印前端 console | `ConsolePage.javaScriptConsoleMessage` 转发到 stdout（`[js:err] 文件:行 消息`） |

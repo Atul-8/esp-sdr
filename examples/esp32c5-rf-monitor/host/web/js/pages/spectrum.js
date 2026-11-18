@@ -231,10 +231,38 @@ window.Pages.spectrum = (function () {
     const plans = info.plans || {};
     const ids = Object.keys(plans);
     if (!ids.length) return;
-    const id = planModule || (moduleId && plans[moduleId] ? moduleId : ids[0]);
+    const id = planModule || (moduleId && plans[moduleId] ? moduleId : widestPlan(plans));
     if (id === planModule) return;
     planModule = id;
     scanbar.setPlan(id, plans[id]);
+  }
+
+  /** 取覆盖跨度最大的计划（并列时按模块 id 排序，保证稳定）。
+   *
+   * 为什么不取 `ids[0]`：那是字典序第一个，`ble_risk` 只扫 2.4G 的 8 个窗，
+   * 拿它当「全频段进度」会把 5G 整段从条上抹掉（自检 `scanbar_bands` 就是这么发现的）。
+   * 进度条要回答的是「整个轮扫走到哪了」，所以跟最宽的计划。
+   */
+  function widestPlan(plans) {
+    let best = null;
+    let bestSpan = -1;
+    Object.keys(plans).sort().forEach((id) => {
+      const windows = plans[id] || [];
+      if (!windows.length) return;
+      let lo = Infinity;
+      let hi = -Infinity;
+      windows.forEach((w) => {
+        const center = Number(w[0]) || 0;
+        const bw = Number(w[1]) || 0;
+        lo = Math.min(lo, center - bw / 2);
+        hi = Math.max(hi, center + bw / 2);
+      });
+      if (hi - lo > bestSpan) {
+        bestSpan = hi - lo;
+        best = id;
+      }
+    });
+    return best || Object.keys(plans)[0];
   }
 
   function onInfo(payload) {

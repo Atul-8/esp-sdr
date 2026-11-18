@@ -789,6 +789,19 @@ class BleRisk(ModePlugin):
                 "excess_db": WIDEBAND_EXCESS_DB,
                 "windows": len(self._spec_sum),
             },
+            # 判据门槛一起下发：前端只显示、不写死数字（改判据不用改网页）
+            "thresholds": {
+                "presence_db": PRESENCE_DB,
+                "prominence_db": PROMINENCE_DB,
+                "narrow_ratio": NARROW_RATIO,
+                "wideband_excess_db": WIDEBAND_EXCESS_DB,
+                "wideband_frac": WIDEBAND_FRAC,
+                "contrast_db": CONTRAST_DB,
+                "light_ratio": LIGHT_RATIO,
+                "min_adv_frames": float(MIN_ADV_FRAMES),
+                "headroom_codes": HEADROOM_CODES,
+                "wifi_busy_fill": WIFI_BUSY_FILL,
+            },
             "data_band": {
                 "slots": len(data_slots()),
                 "active_per_frame": round(self.slot_active, 2),
@@ -821,6 +834,8 @@ class BleRisk(ModePlugin):
             "wifi_channels": self.wifi_channels(),
             "overlap": self.overlap(),
             "hints": self.hints(),
+            # 判据原文一起下发：网页上「判据与边界」直接显示模块自己的话，不在 JS 里重编
+            "notes": self.notes(),
             "headroom_warning": self.headroom_warning(),
             "frames": self.frames,
             "dropped_frames": self.dropped_frames,

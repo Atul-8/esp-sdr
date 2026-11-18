@@ -236,3 +236,26 @@ pre.raw { margin: 0; font: 11px/1.45 var(--mono); color: var(--fg); white-space:
 /* 扫频进度条（scanbar.js） */
 .scanbar { width: 100%; }
 .scanbar__canvas { display: block; width: 100%; height: 66px; }
+
+/* 顶栏增益控件（gain.js）：AGC / 手动 / 自动 + 加减档 + 实时读数 */
+.gainbar { display: flex; align-items: center; gap: 6px; padding: 3px 6px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg-2); }
+.gainbar__label { font-size: 11px; color: var(--fg-dim); }
+.gainbar input[type="number"] { width: 52px; }
+.gainbar__target { display: flex; align-items: center; gap: 4px; font-size: 11px; color: var(--fg-dim); }
+.gainbar__target input[type="number"] { width: 44px; }
+.gainbar__read { font: 11px/1.4 var(--mono); color: #b8ecff; min-width: 132px; }
+.gainbar__read[data-mode="AUTO"] { color: var(--ok); }
+.gainbar__note { font-size: 11px; color: var(--fg-dim); max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 7px; overflow: hidden; }
+.seg__btn { background: transparent; border: 0; color: var(--fg-dim); font: 12px inherit; padding: 4px 9px; cursor: pointer; }
+.seg__btn + .seg__btn { border-left: 1px solid var(--line); }
+.seg__btn:hover { color: var(--fg); }
+.seg__btn--on { background: #10374d; color: #b8ecff; }
+.btn--mini { padding: 2px 7px; font-size: 12px; }
+/* BLE 风险页 */
+.big-risk { font: 700 22px/1.2 var(--mono); }
+.big-risk[data-risk="ok"] { color: var(--ok); }
+.big-risk[data-risk="light"] { color: var(--warn); }
+.big-risk[data-risk="heavy"] { color: var(--err); }
+.big-risk[data-risk="flat"] { color: #c4b5fd; }
+.warn-box { border: 1px solid #6b5a2c; background: #241f0e; color: #fcd34d; border-radius: 8px; padding: 7px 10px; font: 12px/1.5 var(--mono); margin-bottom: 10px; }

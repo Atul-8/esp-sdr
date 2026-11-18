@@ -18,9 +18,22 @@
     <label class="field"><span data-i18n="hdr.port">串口</span>
       <select id="port"><option value="">…</option></select>
     </label>
-    <label class="field"><span data-i18n="hdr.gain">增益档</span>
-      <input id="gain" type="number" min="0" max="127" step="1" value="60" title="固定增益档位（PHY 表索引，不是 dB）。横向比信道必须固定增益。">
-    </label>
+    <div class="gainbar" id="gainbar">
+      <span class="gainbar__label" data-i18n="gain.label">增益</span>
+      <div class="seg" role="group">
+        <button class="seg__btn" data-gain-mode="HARDWARE" data-i18n="gain.hw" data-i18n-title="gain.hwTitle">AGC</button>
+        <button class="seg__btn" data-gain-mode="MANUAL" data-i18n="gain.manual" data-i18n-title="gain.manualTitle">手动</button>
+        <button class="seg__btn" data-gain-mode="AUTO" data-i18n="gain.auto" data-i18n-title="gain.autoTitle">自动</button>
+      </div>
+      <button class="btn btn--mini" id="gain-down" data-i18n-title="gain.down">−</button>
+      <input id="gain" type="number" min="0" max="90" step="1" value="60" title="增益档（PHY 表索引，不是 dB）">
+      <button class="btn btn--mini" id="gain-up" data-i18n-title="gain.up">+</button>
+      <span class="gainbar__target" data-i18n-title="gain.targetTitle"><span data-i18n="gain.target">目标</span>
+        <input id="gain-target" type="number" min="0" max="40" step="1" value="4">
+      </span>
+      <span class="gainbar__read" id="gain-read">—</span>
+      <span class="gainbar__note" id="gain-note"></span>
+    </div>
     <label class="field check"><input type="checkbox" id="mock"> <span data-i18n="hdr.mock">假固件</span></label>
     <label class="field"><span data-i18n="hdr.scenario">场景</span>
       <select id="scenario"></select>
@@ -49,9 +62,11 @@
 <script src="js/popout.js"></script>
 <script src="js/router.js"></script>
 <script src="js/scanbar.js"></script>
+<script src="js/gain.js"></script>
 <script src="js/pages/spectrum.js"></script>
 <script src="js/pages/waterfall.js"></script>
 <script src="js/pages/wifi.js"></script>
+<script src="js/pages/ble.js"></script>
 <script src="js/pages/raw.js"></script>
 <script src="js/app.js"></script>
 </body>

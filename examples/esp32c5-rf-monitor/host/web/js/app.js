@@ -38,6 +38,7 @@
       Router.dispatch("Tables", payload);
     });
     Bridge.on("stats", onStats);
+  Bridge.on("gain", (state) => { if (window.Gain) Gain.apply(state); });
     Bridge.on("info", onInfo);
     Bridge.on("state", onState);
     Bridge.on("log", (payload) => log(payload));
@@ -109,6 +110,14 @@
     if (defaults.gain_index !== null && defaults.gain_index !== undefined) {
       document.getElementById("gain").value = defaults.gain_index;
     }
+    if (defaults.gain_target !== null && defaults.gain_target !== undefined) {
+      document.getElementById("gain-target").value = defaults.gain_target;
+    }
+    if (defaults.gain_mode) {
+      document.querySelectorAll("[data-gain-mode]").forEach((btn) => {
+        btn.classList.toggle("seg__btn--on", btn.dataset.gainMode === defaults.gain_mode);
+      });
+    }
   }
 
   /**
@@ -119,6 +128,7 @@
     let rt = null;
     try { rt = await Bridge.call("runtime"); } catch (err) { return; }
     if (!rt) return;
+    if (rt.gain) Gain.apply(rt.gain);
     if (rt.info) onInfo(rt.info, true);
     if (rt.stats) onStats(rt.stats);
     // 独立窗口是「晚连上」的：把最后一帧频谱 / 最后一次表格直接回放给它
@@ -132,6 +142,7 @@
 
   /** 语言变了：底部 kv 与状态栏要重算（各页自己由 Router.relabel 通知） */
   window.addEventListener("langchange", () => {
+    if (window.Gain) Gain.relabel();
     rerenderKv();
     const st = state.status;
     setStatus(st.name, st.key, st.raw);
@@ -182,15 +193,20 @@
   function bindControls() {
     document.getElementById("btn-start").addEventListener("click", startRun);
     document.getElementById("btn-stop").addEventListener("click", stopRun);
+    Gain.init();
   }
 
   async function startRun() {
     const mock = document.getElementById("mock").checked;
     const gainRaw = document.getElementById("gain").value;
+    const gainMode = Gain.mode();
     const config = {
       port: document.getElementById("port").value,
       baudrate: 2000000,
-      gain_index: mock || gainRaw === "" ? null : parseInt(gainRaw, 10),
+      // AGC 模式下不发档位（固件自己挑）；手动 / 自动都从当前显示的档位起步
+      gain_index: mock || gainMode === "HARDWARE" || gainRaw === "" ? null : parseInt(gainRaw, 10),
+      gain_mode: mock ? "HARDWARE" : gainMode,
+      gain_target: Gain.target(),
       mock: mock,
       scenario: document.getElementById("scenario").value,
       bins_out: 256,
@@ -243,9 +259,20 @@
 
   // ---- 事件 -------------------------------------------------------------
   function gainText(info) {
-    return info.gain_index === null || info.gain_index === undefined
+    const live = window.Gain ? Gain.probe() : null;
+    if (!live) {
+      return info.gain_index === null || info.gain_index === undefined
+        ? T("kv.gainAgc")
+        : T("kv.gainFixed", { n: info.gain_index });
+    }
+    const base = live.mode === "HARDWARE"
       ? T("kv.gainAgc")
-      : T("kv.gainFixed", { n: info.gain_index });
+      : T("kv.gainFixed", { n: live.index });
+    const floor = live.floor_code === null || live.floor_code === undefined
+      ? "—"
+      : Number(live.floor_code).toFixed(1);
+    return base + " · " + T("kv.gainFloor", { code: floor }) +
+      (live.mode === "AUTO" ? " · " + T("kv.gainAuto", { n: live.adjusts || 0 }) : "");
   }
 
   function renderKv(pairs) {
@@ -287,6 +314,7 @@
 
   function onStats(stats) {
     state.stats = stats;
+    if (stats && stats.gain && window.Gain) Gain.apply(stats.gain);
     const info = state.info;
     if (!info) return;
     renderKv([

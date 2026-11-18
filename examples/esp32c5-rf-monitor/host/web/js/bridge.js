@@ -42,7 +42,8 @@ window.Bridge = (function () {
     }
     new QWebChannel(qt.webChannelTransport, (channel) => {
       backend = channel.objects.backend;
-      ["info", "spectrum", "tables", "stats", "state", "log"].forEach((sig) => {
+      // gain：顶栏控件按下去立刻回推一次状态（不用等下一个 stats 周期）
+      ["info", "spectrum", "tables", "stats", "gain", "state", "log"].forEach((sig) => {
         backend[sig].connect((text) => {
           let data = text;
           try { data = JSON.parse(text); } catch (e) { /* 非 JSON 原样传 */ }

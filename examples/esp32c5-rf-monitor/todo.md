@@ -250,7 +250,15 @@ microwave/waterfall-p1.html 2.9 KB                 mixed/waterfall-p1.html 2.9 K
   一行 = 一轮完整轮扫、一格一字节、0 码画最暗色；鼠标读频率/功率码；按钮走
   `Bridge.renderWaterfall()` → `produce(force=True)` 在 `.data/waterfall/` 出 PNG + HTML 翻页，
   `Bridge.openFile()` 只在 `.data/` 内允许打开（越界直接拒）。
-  `--selftest` 新增 `waterfall_rows/painted/cards/banner/notes/sweep/render/share` 等（共 **29 项 checks**）。
+  `--selftest` 新增 `waterfall_rows/painted/cards/banner/notes/sweep/render/share` 等。
+- **增益调控（本轮新增，`host/gain.py`）**：顶栏 `AGC | 手动 | 自动` 三段按钮 +
+  `− 档号 +` 步进 + `目标` 输入框 + `档 N · 实测 M · 底噪 X 码` 读数 + 自动调整次数。
+  `GainControl`（GUI 线程只写意图）+ `GainAwareSource`（`scan()` 开头落地命令、轮末结算）。
+  档位范围问固件 `GAIN?`（实板 0..81），不写死。
+- **BLE 风险评估页（本轮新增，`web/pages/ble/` + `js/pages/ble.js`）**：告警条 + 5 张判定卡 +
+  6 行证据链 + 9 列广播信道表 + 3D 信道柱 + 2.4G 在用信道 + `hints`/`notes` 原文 + payload 存底。
+  门槛全部来自 `payload.thresholds`，前端零硬编码判据。
+- `host/web/js/i18n.js` 补 `gain.*`（2 语言 × 10 键）与整页 `ble.*`（约 40 键 × 2 语言）。
 - `host/paths.py`：定位分析层（`ESPSDR_SRC` 权威值 > `host/src` > 向上 4 层）
 - `host/web/js/i18n.js` + `--lang zh|en`：外壳文案中英切换（模块自产表格沿用模块语言）
 - `host/web/js/scanbar.js`：扫频进度条（频段地图 + 回卷游标，数据来自 `info.plans`）
@@ -269,7 +277,8 @@ microwave/waterfall-p1.html 2.9 KB                 mixed/waterfall-p1.html 2.9 K
 | 验收项 | 判据 | 结果 |
 | --- | --- | --- |
 | 逻辑层自测 | `cd host && python -m unittest discover -s tests -t tests` 0 失败 | ✅ 23 passed |
-| 无人工自检（假固件） | `python app.py --selftest --seconds 8 --shot out.png` 退出码 0 | ✅ 退出码 0，**29/29 checks** |
+| 增益逻辑自测 | `cd host && python tests/test_gain.py` 0 失败 | ✅ **32 passed**（含闭环热身/死区/确认/边界/退化帧/属性透传） |
+| 无人工自检（假固件） | `python app.py --selftest --seconds 8 --shot out.png` 退出码 0 | ✅ 退出码 0，**40/40 checks**（连跑 2 次稳定） |
 | 频谱页真的在画 | 收到帧 > 0 且 2D/3D 画布非黑比例 > 1% | ✅ 188 帧；spec 24.7% / 3D 10.1% / 2D 瀑布 11.6% |
 | **2D 瀑布真的在滚** | 缓冲行数 240；`paintedRows ≥ 10`、`distinctRows ≥ 0.9×frames`、顶部均值 > 底部 + 100 | ✅ `paintedRows 35 / frames 35 / distinctRows 32 / topMean 291 / bottomMean 33` |
 | **扫频进度条：分段** | 从 `info.plans` 自动切段，至少 2 段、总窗数 > 10 | ✅ `2.4G`（2402–2482，5 窗）+ `5G`（5170–5835，44 窗）= 49 窗 |
@@ -295,6 +304,11 @@ epo\examples\esp32c5-rf-monitor`；`ESPSDR_SRC=/tmp` 正确抛错 |
 | **单射频配比公平** | 两个模块各拿一半射频（`share` 各 ≈0.5） | ✅ 两边 `slice_weight=1.0`；改前实测 `{waterfall 0.016, wifi_check 0.984}`（瀑布一轮被拉成 5 分钟） |
 | **进度条只跟一个计划** | 多模块同跑时不因换计划把 `visited` 清零 | ✅ `planModule` 固定；真板 40 s 探针 `visited 15 / passes 1` |
 | **重叠窗不误判换轮** | 「索引变小」加幅度门槛（跳回大半张图才算换轮） | ✅ `scanbar.js` 用 `index - found > plan.length/2` |
+| **进度条跟最宽计划** | 多计划并存时 5G 整段不能消失 | ✅ 假固件 `scanbar {groups 3, windows 44, visited 13}`；修前跟 `ble_risk` 只剩 2.4G 8 窗、`visited 5` |
+| **BLE 页真的在判** | 表格 ≥3 行、判词非空、证据链 ≥6 行、hints ≥1、notes ≥3、3D 有柱 | ✅ `rows 3 / risk WiFi 压制型 / evidence 6 / hints 3 / notes 8 / bars3d true` |
+| **增益：手动生效（真板）** | 档位回读一致 + 底噪随档位变 | ✅ `GAIN?` 回 `GAIN MANUAL 60 0 81 1`；0→81 逐档实测底噪 `0.0 … 63.0` 码（跨度 63），峰值 `46 → 133` |
+| **增益：自动闭环（真板）** | 起始 60 → 向目标 8 码收敛 | ✅ 14 轮 `60→58→56→54→52→50→48`，平滑底噪 `39.0→14.4`，每 2 轮一档 |
+| **增益：界面三项自检** | 手动/`+`/自动 三个动作都改到后端状态 | ✅ `gain_manual`/`gain_step`(+1)/`gain_auto`(`AUTO`)/`gain_on_button`(`["AUTO"]`)/`gain_readback`(含「底噪」) |
 
 未覆盖（必须诚实标注）：
 
@@ -307,6 +321,11 @@ epo\examples\esp32c5-rf-monitor`；`ESPSDR_SRC=/tmp` 正确抛错 |
   只有纯浏览器打开网页时才会退化成 `popout--max`（铺满窗口）。
 - 3D 视图**没有自动对比度/色标校准**，只是同一色带映射；不做定量判读。
 - 页面刷新率受采集线程节流（20fps），**不是**固件原始帧率。
+- **自动增益闭环是主机侧**（改档位 → 等一轮 → 再量），不是固件内环；一轮 1~12 s，
+  环境突变时它要几轮才跟上。固件侧自动标定**没做**（需人类裁决）。
+- 自动闭环的目标是「底噪参考码」，**不是**「信号最强」：弱信号环境里它会让底噪贴目标，
+  强信号可能因此变糊——要测弱信号请用 `HARDWARE` 或手动钉高档。
+- BLE 页的「硬冲突」判据是 `overlap.fraction >= 0.9` 的**几何重叠**，不是实测同频打架。
 - 扫频进度条的**段名**（2.4G / 5G）是前端按频率猜的纯装饰标签，判据全部来自
   `info.plans`；游标位置只反映「正在读哪个窗」，不表示覆盖质量。
 - 弹出预览的**「全屏」按钮**走浏览器 Fullscreen API，QWebEngine 默认不 accept，
@@ -333,8 +352,11 @@ epo\examples\esp32c5-rf-monitor`；`ESPSDR_SRC=/tmp` 正确抛错 |
 - **上位机瀑布图页嵌不嵌**：已按人类「烧录了就做上位机给我」需求在 `feat/host-gui` 落地（`web/pages/waterfall/`），
   本源实现 `modes/waterfall.py:web_payload()`；不需要再等裁决。
 
-- **固定增益档位的产品化口径**：当前靠人工给 `--gain-index 60`。要不要做自动标定
-  （逐档试扫、挑不饱和的最高档）需要人类定，属于应用层（不碰 `core/`）。
+- **固定增益档位的产品化口径**：当前靠人工给 `--gain-index 60`，上位机已给**主机侧**
+  自动闭环（`--gain-mode AUTO`）。固件侧自动标定（逐档试扫、挑不饱和的最高档）仍然
+  **需要人类裁决**，属于固件/应用层（不碰 `core/`）。
+- **阶段 4/5 是否放行**：阶段 4 `feat/4-guard-58g`、阶段 5 `feat/5-capture` 仍是 `[TODO]`；
+  按 docx 的硬 STOP 规则应等人类「确认完成」阶段 0~3 后再开工。
 
 ## 约定
 

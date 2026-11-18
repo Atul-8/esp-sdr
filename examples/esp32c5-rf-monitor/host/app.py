@@ -102,6 +102,7 @@ class Bridge(QObject):
     spectrum = Signal(str)
     tables = Signal(str)
     stats = Signal(str)
+    gain = Signal(str)
     state = Signal(str)
     log = Signal(str)
 
@@ -148,6 +149,20 @@ class Bridge(QObject):
     def openFile(self, path: str) -> str:  # noqa: N802 - JS 侧用驼峰
         """用系统默认程序打开产物（只允许 ``.data/`` 下的东西，防越权）。"""
         return to_json(self._window.open_report(path))
+
+    @Slot(result=str)
+    def gainState(self) -> str:  # noqa: N802 - JS 侧用驼峰
+        """当前增益状态（模式/档位/底噪读数）。前端首屏和 `runtime()` 都会用。"""
+        return to_json(self._window.gain_state())
+
+    @Slot(str, result=str)
+    def gainControl(self, payload: str) -> str:  # noqa: N802 - JS 侧用驼峰
+        """顶栏增益控件：``{action:"mode"|"step"|"index"|"target", ...}``。
+
+        只写「意图」，真正的 `GAIN` 命令由射频线程在**两次扫描之间**发出去
+        （扫描中途插命令会把串口读缓冲打乱，实测 ``SPEC 启动回复异常``）。
+        """
+        return to_json(self._window.gain_control(payload))
 
     @Slot(result=str)
     def renderText(self) -> str:  # noqa: N802
@@ -290,6 +305,10 @@ class HostWindow(QObject):
         self.lang = "zh"
         self.default_port = "COM56"
         self.default_gain: int | None = None
+        #: 增益模式默认值（HARDWARE/MANUAL/AUTO）；界面里随时可切
+        self.default_gain_mode = "MANUAL"
+        #: AUTO 模式目标底噪参考码
+        self.default_gain_target = 4.0
         self.view = view
         self.bridge = Bridge(self)
         self.session: HostSession | None = None
@@ -317,10 +336,44 @@ class HostWindow(QObject):
     def _cache_tables(self, payload: str) -> None:
         self.last_tables = payload
 
+    def gain_state(self) -> dict[str, object]:
+        session = self.session
+        if session is None:
+            # 还没开始采集：给一份「将要用的」状态，顶栏不会空着
+            return {
+                "kind": "gain",
+                "mode": self.default_gain_mode,
+                "index": self.default_gain if self.default_gain is not None else 60,
+                "effective": None,
+                "floor_code": None,
+                "target": self.default_gain_target,
+                "tolerance": 1.5,
+                "step": 2,
+                "min_index": 0,
+                "max_index": 90,
+                "samples": 0,
+                "adjusts": 0,
+                "history": [],
+                "note": "未开始采集（点了「开始」后这里会显示实时档位与底噪）",
+                "mock": False,
+                "ok": True,
+            }
+        return session.gain_state()
+
+    def gain_control(self, payload: str) -> dict[str, object]:
+        session = self.session
+        if session is None:
+            return {"kind": "gain", "ok": False, "note": tr(self.lang, "gain_no_session")}
+        state = session.gain_control(payload)
+        # 立刻回推一次：界面按下去就有反馈，不用等下一个 stats 周期
+        self.bridge.gain.emit(to_json(state))
+        return state
+
     def runtime(self) -> dict[str, object]:
         session = self.session
         runner = self.runner
         return {
+            "gain": self.gain_state(),
             "running": bool(runner is not None and runner.isRunning()),
             "info": session.describe() if session is not None else None,
             "stats": session.stats() if session is not None else None,
@@ -330,7 +383,13 @@ class HostWindow(QObject):
         }
 
     def ui_defaults(self) -> dict[str, object]:
-        return {"lang": self.lang, "port": self.default_port, "gain_index": self.default_gain}
+        return {
+            "lang": self.lang,
+            "port": self.default_port,
+            "gain_index": self.default_gain,
+            "gain_mode": self.default_gain_mode,
+            "gain_target": self.default_gain_target,
+        }
 
     # ---- 瀑布图出图（网页按钮 → Python） ---------------------------------
     def render_waterfall(self) -> dict[str, object]:
@@ -512,6 +571,13 @@ def build_app(argv: list[str]) -> tuple[QApplication, QWebEngineView, HostWindow
     parser = argparse.ArgumentParser(description="esp-sdr 测试上位机（WebView 版）")
     parser.add_argument("--port", default="COM56", help="默认串口（界面里还能改）")
     parser.add_argument("--gain-index", type=int, default=60, help="默认固定增益档位（真机）")
+    parser.add_argument(
+        "--gain-mode",
+        default="MANUAL",
+        choices=["HARDWARE", "MANUAL", "AUTO"],
+        help="默认增益模式：HARDWARE=固件 AGC / MANUAL=固定档位 / AUTO=主机闭环（把底噪压到 --gain-target）",
+    )
+    parser.add_argument("--gain-target", type=float, default=4.0, help="--gain-mode AUTO 的目标底噪参考码")
     parser.add_argument("--mock", action="store_true", help="启动即用假固件自跑")
     parser.add_argument("--scenario", default="wifi_busy", help="--mock 时的场景")
     parser.add_argument("--autostart", action="store_true", help="页面加载完成后自动开始")
@@ -537,6 +603,8 @@ def build_app(argv: list[str]) -> tuple[QApplication, QWebEngineView, HostWindow
     window.lang = args.lang
     window.default_port = args.port
     window.default_gain = args.gain_index
+    window.default_gain_mode = args.gain_mode
+    window.default_gain_target = args.gain_target
     window.load()
     return app, view, window, args
 
@@ -587,6 +655,16 @@ def run_selftest(app: QApplication, view: QWebEngineView, window: HostWindow, ar
                 return { ok: opened, themed: themed, back: !p.classList.contains('panel--popped') };
             })()
         })""",
+        "ble": """JSON.stringify({
+            rows: document.querySelectorAll('#ble-rows tr').length,
+            risk: ((document.querySelector('#risk-type')||{}).textContent||''),
+            riskNote: ((document.querySelector('#risk-note')||{}).textContent||''),
+            evidence: document.querySelectorAll('#ev-rows tr').length,
+            hints: document.querySelectorAll('#ble-hints li').length,
+            notes: document.querySelectorAll('#ble-notes li').length,
+            warn: ((document.querySelector('#ble-warn')||{}).textContent||'').length,
+            probe: (window.Pages.ble.probe ? Pages.ble.probe() : null)
+        })""",
         "waterfall": """JSON.stringify({
             probe: (window.Pages.waterfall && Pages.waterfall.probe ? Pages.waterfall.probe() : null),
             cards: document.querySelectorAll('#page-container .card').length,
@@ -607,6 +685,7 @@ def run_selftest(app: QApplication, view: QWebEngineView, window: HostWindow, ar
         spectrum = pages.get("spectrum", {}) if isinstance(pages, dict) else {}
         wifi = pages.get("wifi", {}) if isinstance(pages, dict) else {}
         raw = pages.get("raw", {}) if isinstance(pages, dict) else {}
+        ble_page = pages.get("ble", {}) if isinstance(pages, dict) else {}
         wf_page = pages.get("waterfall", {}) if isinstance(pages, dict) else {}
         wf_page_probe = (wf_page.get("probe") or {}) if isinstance(wf_page, dict) else {}
         canvases = spectrum.get("canvases", []) if isinstance(spectrum, dict) else []
@@ -714,6 +793,21 @@ def run_selftest(app: QApplication, view: QWebEngineView, window: HostWindow, ar
             "wifi_rows": int(wifi.get("rows", 0) or 0) > 5,
             "wifi_recommend": bool(str(wifi.get("rec24", "")).startswith("ch")),
             "wifi_notes": int(wifi.get("notes", 0) or 0) >= 3,
+            # BLE 风险页：判词/证据链/广播信道/建议 都要真有东西
+            "ble_rows": int(ble_page.get("rows", 0) or 0) >= 3,
+            "ble_risk": len(str(ble_page.get("risk", ""))) > 1,
+            "ble_evidence": int(ble_page.get("evidence", 0) or 0) >= 6,
+            "ble_hints": int(ble_page.get("hints", 0) or 0) >= 1,
+            "ble_notes": int(ble_page.get("notes", 0) or 0) >= 3,
+            "ble_bars3d": bool((ble_page.get("probe") or {}).get("bars3d")),
+            # 增益控件：手动→升档→自动 一路走通，且顶栏读数是 Python 回推的
+            "gain_manual": str((report.get("gain") or {}).get("index0", "")) != "",
+            "gain_step": bool(report.get("gain"))
+            and int((report.get("gain") or {}).get("stepped", {}).get("index", -1))
+            == int((report.get("gain") or {}).get("index0", -9)) + 1,
+            "gain_auto": str(((report.get("gain") or {}).get("auto") or {}).get("mode", "")) == "AUTO",
+            "gain_on_button": list((report.get("gain") or {}).get("on") or []) == ["AUTO"],
+            "gain_readback": "底噪" in str((report.get("gain") or {}).get("read", "")),
             "raw_panels": int(raw.get("panels", 0) or 0) >= 1,
             "raw_text": int(raw.get("textLen", 0) or 0) > 40,
             # 瀑布图页：页面自报的画布/卡片/声明都到位，且热力图像素真画上了
@@ -763,12 +857,68 @@ def run_selftest(app: QApplication, view: QWebEngineView, window: HostWindow, ar
             elif page_id == "waterfall":
                 # 瀑布图页：点一次「生成 PNG + HTML」，验 JS→Bridge→produce(force) 整条链路
                 waterfall_render_test(lambda: stage(nxt[0]))
+            elif page_id == "ble":
+                # BLE 页探完顺手动一遍顶栏增益控件：JS → Bridge → HostSession → 状态回推
+                QTimer.singleShot(400, lambda: gain_test(lambda: stage(nxt[0])))
             elif nxt:
                 QTimer.singleShot(400, lambda: stage(nxt[0]))
             else:
                 finish()
 
         QTimer.singleShot(1800, probe)
+
+    def gain_test(then) -> None:
+        """顶栏增益控件实操：切手动 → 升一档 → 切自动，读回状态与显示。
+
+        验的是「按钮真能改到射频参数」这条链，不是好看：
+        `#gain-read` 由 Python 的 `stats.gain` 驱动，它有数就说明
+        Slot → HostSession.gain_control → 回推 → 顶栏渲染 全都通了。
+        """
+        view.page().runJavaScript(
+            "(async function () {"
+            " window.__gain = {};"
+            " var call = async function (o) { return Bridge.call('gainControl', JSON.stringify(o)); };"
+            " try {"
+            "   var before = Gain.probe() || {};"
+            "   window.__gain.manual = await call({action: 'mode', mode: 'MANUAL'});"
+            "   window.__gain.index0 = window.__gain.manual.index;"
+            "   window.__gain.stepped = await call({action: 'step', delta: 1});"
+            "   window.__gain.auto = await call({action: 'mode', mode: 'AUTO'});"
+            "   window.__gain.target = await call({action: 'target', target: 5});"
+            "   window.__gain.before = {mode: before.mode, index: before.index};"
+            " } catch (e) { window.__gain.err = String(e); }"
+            "})()"
+        )
+
+        def read_back() -> None:
+            view.page().runJavaScript(
+                "JSON.stringify(Object.assign({}, window.__gain || {}, {"
+                "  read: ((document.querySelector('#gain-read')||{}).textContent||''),"
+                "  note: ((document.querySelector('#gain-note')||{}).textContent||''),"
+                "  on: Array.from(document.querySelectorAll('[data-gain-mode]'))"
+                "        .filter(function (b) { return b.classList.contains('seg__btn--on'); })"
+                "        .map(function (b) { return b.dataset.gainMode; }),"
+                "  live: Gain.probe()"
+                "}))",
+                0,
+                collect_gain,
+            )
+
+        def collect_gain(result: object) -> None:
+            try:
+                payload = json.loads(str(result)) if result else {}
+            except Exception:  # noqa: BLE001
+                payload = {"parse_error": str(result)}
+            payload["shot"] = shot("gain")
+            report["gain"] = payload
+            steps.append(
+                "增益控件：" + json.dumps(
+                    {k: payload.get(k) for k in ("index0", "read", "on")}, ensure_ascii=False
+                )
+            )
+            then()
+
+        QTimer.singleShot(1000, read_back)
 
     def waterfall_render_test(then) -> None:
         """点瀑布图页的「生成 PNG + HTML」，等生成完后读回状态行。
@@ -949,7 +1099,7 @@ def run_selftest(app: QApplication, view: QWebEngineView, window: HostWindow, ar
 
         QTimer.singleShot(700, probe_lang)
 
-    ORDER = ["spectrum", "waterfall", "wifi", "raw"]
+    ORDER = ["spectrum", "waterfall", "wifi", "ble", "raw"]
 
     def start_after_load() -> None:
         if not window.page_loaded:
@@ -966,6 +1116,9 @@ def run_selftest(app: QApplication, view: QWebEngineView, window: HostWindow, ar
                     "mock": (bool(args.mock) or not args.real) if args.selftest else bool(args.mock),
                     "scenario": args.scenario,
                     "gain_index": args.gain_index,
+                    # 自检也走同一套模式选择：AUTO 会被自检顺手验一遍
+                    "gain_mode": args.gain_mode,
+                    "gain_target": args.gain_target,
                     "bins_out": 256,
                     "lang": args.lang,
                 }
@@ -1006,6 +1159,8 @@ def main(argv: list[str] | None = None) -> int:
                         "mock": bool(args.mock),
                         "scenario": args.scenario,
                         "gain_index": args.gain_index,
+                        "gain_mode": args.gain_mode,
+                        "gain_target": args.gain_target,
                         "bins_out": 256,
                         "lang": args.lang,
                     }

@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from typing import Any, Iterable
 
 import paths  # 本地模块：定位分析层（core/ modes/ output/ tests/）
+from gain import MODES as GAIN_MODES, GainAwareSource, GainControl, parse_gain_line  # noqa: E402
 
 #: 分析层目录（<proj>/repo/examples/esp32c5-rf-monitor 或 $ESPSDR_SRC）
 SRC_DIR = str(paths.ensure_on_path())
@@ -54,6 +55,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "pack_failed": "打包频谱失败：{error}",
         "thread_error": "[线程异常] {error}",
         "already_running_log": "[打开失败] {message}",
+        "gain_no_session": "还没开始采集：点「开始」后再调增益",
     },
     "en": {
         "probe_only": "No functional module in modes/ yet — using the link probe to verify the board",
@@ -69,6 +71,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "pack_failed": "Failed to pack spectrum: {error}",
         "thread_error": "[Thread error] {error}",
         "already_running_log": "[Open failed] {message}",
+        "gain_no_session": "Not collecting yet — press Start before changing gain",
     },
 }
 
@@ -142,6 +145,8 @@ CONFIG_FIELDS: dict[str, tuple[type, bool]] = {
     "port": (str, False),
     "baudrate": (int, False),
     "gain_index": (int, True),
+    "gain_mode": (str, True),
+    "gain_target": (float, True),
     "mock": (bool, False),
     "scenario": (str, False),
     "bins_out": (int, False),
@@ -157,6 +162,10 @@ class HostConfig:
     port: str = "COM56"
     baudrate: int = 2_000_000
     gain_index: int | None = None
+    #: 增益模式：HARDWARE(固件 AGC) / MANUAL(固定档) / AUTO(主机闭环)；空 = 有档位就 MANUAL
+    gain_mode: str | None = None
+    #: AUTO 模式的目标底噪参考码（功率码，不是 dBm）
+    gain_target: float | None = None
     mock: bool = False
     scenario: str = "mixed"
     bins_out: int = DEFAULT_BINS_OUT
@@ -180,11 +189,17 @@ class HostConfig:
                 setattr(cfg, key, bool(value))
             elif kind is int:
                 setattr(cfg, key, int(value))
+            elif kind is float:
+                setattr(cfg, key, float(value))
             else:
                 setattr(cfg, key, str(value))
         cfg.lang = (cfg.lang or "zh").lower()
         if cfg.lang not in LANGS:
             raise ValueError(f"未知语言：{cfg.lang}（可选 {'/'.join(LANGS)}）")
+        if cfg.gain_mode and cfg.gain_mode.upper() not in GAIN_MODES:
+            raise ValueError(f"未知增益模式：{cfg.gain_mode}（可选 {'/'.join(GAIN_MODES)}）")
+        if cfg.gain_mode:
+            cfg.gain_mode = cfg.gain_mode.upper()
         if cfg.scenario not in SCENARIOS:
             raise ValueError(f"未知场景：{cfg.scenario}（可选 {', '.join(sorted(SCENARIOS))}）")
         return cfg
@@ -213,6 +228,8 @@ class HostSession:
     store: Any = field(init=False, default=None)
     config: HostConfig | None = field(init=False, default=None)
     last_error: str = field(init=False, default="")
+    #: 增益调控（GUI 线程写意图 / 射频线程落地 + 闭环；见 host/gain.py）
+    gain: GainControl = field(init=False, default_factory=GainControl)
     #: 每个快照的回调（GUI 用它推频谱；``step()`` 每次可换）
     on_snapshot_cb: Any = field(init=False, default=None, repr=False)
 
@@ -241,8 +258,21 @@ class HostSession:
             factory = None
         self.link = EspSdrLink(config.port, config.baudrate, factory=factory)
         self.link.open()
-        if config.gain_index is not None and not config.mock:
-            self.link.set_gain("MANUAL", config.gain_index)
+        mode = config.gain_mode or ("MANUAL" if config.gain_index is not None else "HARDWARE")
+        self.gain = GainControl(
+            mode=mode,
+            index=config.gain_index if config.gain_index is not None else None,
+            target=config.gain_target if config.gain_target is not None else 4.0,
+            mock=config.mock,
+        )
+        # 初始档位**建控制器时**就落地：真链路等第一次 scan 才设的话，前几帧都是 AGC 值
+        if not config.mock:
+            # 先问固件要真实的档位范围（实板 0..81，兜底写死 90 会给出无效档）
+            try:
+                self.gain.set_limits(parse_gain_line(self.link.command("GAIN?", strict=False)))
+            except Exception:  # noqa: BLE001 - 老固件不认 GAIN? 就用兜底范围
+                pass
+            self.gain.apply(self.link)
         self.store = None
         if config.store_path:
             from core.store import Store
@@ -250,7 +280,11 @@ class HostSession:
             self.store = Store(config.store_path)
         self.last_run_stats = None
         self.scheduler = Scheduler(
-            self.link, self.registry, store=self.store, on_snapshot=self._dispatch_snapshot
+            # 包一层：增益变更只在两次扫描之间落地（扫描中途插 GAIN 会把串口读缓冲打乱）
+            GainAwareSource(self.link, self.gain),
+            self.registry,
+            store=self.store,
+            on_snapshot=self._dispatch_snapshot,
         )
         self.frames_in = 0
         self.frames_out = 0
@@ -277,6 +311,32 @@ class HostSession:
         self.link = None
         self.scheduler = None
         self.store = None
+
+    # ---- 增益 ------------------------------------------------------------
+    def gain_state(self) -> dict[str, Any]:
+        return self.gain.state()
+
+    def gain_control(self, payload: str) -> dict[str, Any]:
+        """顶栏增益控件 → 控制器。**只写意图**：真正的串口命令在两次扫描之间发。"""
+        try:
+            req = json.loads(payload) if payload else {}
+        except Exception as exc:  # noqa: BLE001 - 前端传坏了不能把窗口带崩
+            return {"kind": "gain", "ok": False, "note": f"参数不是 JSON：{exc}"}
+        if not isinstance(req, dict):
+            return {"kind": "gain", "ok": False, "note": "参数必须是对象"}
+        action = str(req.get("action") or "").lower()
+        try:
+            if action == "mode":
+                return self.gain.request_mode(str(req.get("mode") or ""))
+            if action == "step":
+                return self.gain.request_step(int(req.get("delta") or 0))
+            if action == "index":
+                return self.gain.request_index(int(req.get("index") or 0))
+            if action == "target":
+                return self.gain.request_target(float(req.get("target") or 0))
+        except (TypeError, ValueError) as exc:
+            return {"kind": "gain", "ok": False, "note": f"参数不合法：{exc}"}
+        return self.gain.state(message=f"未知操作：{action or '（空）'}")
 
     # ---- 驱动 ------------------------------------------------------------
     def _dispatch_snapshot(self, snap: Snapshot) -> None:
@@ -360,7 +420,13 @@ class HostSession:
         if stats is None:
             return {"kind": "stats", "plugins": [], "slices": 0, "snapshots": 0, "elapsed_s": 0.0}
         self.last_run_stats = stats
-        return {"kind": "stats", "uptime_s": round(time.time() - self.started_at, 1), **stats.as_dict()}
+        return {
+            "kind": "stats",
+            "uptime_s": round(time.time() - self.started_at, 1),
+            # 增益读数跟着每秒的统计一起推：前端不用额外轮询，也不会算出「改了但没生效」
+            "gain": self.gain.state(),
+            **stats.as_dict(),
+        }
 
     def _plugin_requests(self) -> list[tuple[Any, list[Any]]]:
         """(插件, 扫描请求列表)；没实现 scan_requests 的插件给空表。"""
@@ -383,6 +449,7 @@ class HostSession:
             "mock": bool(self.config and self.config.mock),
             "scenario": self.config.scenario if self.config else "",
             "gain_index": self.config.gain_index if self.config else None,
+            "gain": self.gain.state(),
             "lang": self.lang,
             "identity": "",
             "transport": "",

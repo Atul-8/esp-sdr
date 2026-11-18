@@ -21,6 +21,13 @@
     "hint_en": "sorted by excess"
   },
   {
+    "id": "ble",
+    "title": "BLE 风险评估",
+    "hint": "广播信道 + 六档判词",
+    "title_en": "BLE risk",
+    "hint_en": "advertising channels"
+  },
+  {
     "id": "raw",
     "title": "原始输出",
     "hint": "任意模块表格兜底",
