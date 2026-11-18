@@ -53,6 +53,10 @@ EXPECT: dict[str, dict[str, Any]] = {
     "unknown_cw": {"capture_max": 2},
     "unknown_cw_clean": {"capture_min": 1},
     "mixed": {"capture_max": 3},
+    # 反偷拍「整场」场景（5.8G 模拟图传 + 2.4G 隐藏窄带源）。四模块共享射频时，
+    # 两边都攒不够帧（守卫要每窗连续 8 帧、抓档要同窗 3 s 跨度），所以这里只验
+    # 「在算 + 不误炸」；**「能发现」由 testing/anti_peep_sim.py 独占跑法自证**。
+    "hotel_scan": {"capture_max": 4, "guard_analyses_min": 5},
 }
 
 

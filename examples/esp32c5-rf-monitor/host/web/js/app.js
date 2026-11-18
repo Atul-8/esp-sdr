@@ -423,6 +423,73 @@
     };
   };
 
+  /**
+   * 布局探针：窗口态/最大化/拖小 时，顶栏那些按钮是不是都还「完整落在可视区」。
+   *
+   * 判据三条（只要有一条不满足就算被裁）：
+   *   1. 自己有尺寸（`w > 0 && h > 0`）—— 被 display:none 或压成 0 宽也算不可见；
+   *   2. 四边都不超出 `window.innerWidth/innerHeight`；
+   *   3. 祖先里没有 `overflow:hidden` 的盒子把它的矩形裁掉（顶栏自己滚不算裁，
+   *      因为滚得出来 = 用户点得到，但这里仍记进 `scrollable` 供排查）。
+   * 用 getBoundingClientRect 而不是 offsetWidth：后者不带滚动/裁剪信息。
+   */
+  const LAYOUT_TARGETS = [
+    ["port", "#port"],
+    ["gainbar", "#gainbar"],
+    ["gainMode", "[data-gain-mode]"],
+    ["gainStep", "#gain-up"],
+    ["mock", "#mock"],
+    ["scenario", "#scenario"],
+    ["start", "#btn-start"],
+    ["stop", "#btn-stop"],
+    ["lang", "#btn-lang"],
+    ["status", "#status"],
+    ["nav", ".side"],
+    ["foot", ".foot"],
+  ];
+
+  function visibleInViewport(node) {
+    if (!node) return { ok: false, why: "missing" };
+    const r = node.getBoundingClientRect();
+    if (r.width < 1 || r.height < 1) return { ok: false, why: "zero-size" };
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const over = {
+      left: Math.round(-r.left),
+      top: Math.round(-r.top),
+      right: Math.round(r.right - vw),
+      bottom: Math.round(r.bottom - vh),
+    };
+    const clipped = Object.keys(over).some((k) => over[k] > 1);
+    return {
+      ok: !clipped,
+      why: clipped ? "out-of-viewport" : "",
+      over: over,
+      rect: { x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height) },
+    };
+  }
+
+  window.Layout = {
+    probe: function probe() {
+      const items = {};
+      const bad = [];
+      LAYOUT_TARGETS.forEach(function (pair) {
+        const key = pair[0];
+        const node = document.querySelector(pair[1]);
+        const res = visibleInViewport(node);
+        items[key] = res.ok ? 1 : 0;
+        if (!res.ok) bad.push(key + ":" + res.why + ":" + JSON.stringify(res.over || null));
+      });
+      const page = document.getElementById("page-container");
+      const shell = { vw: window.innerWidth, vh: window.innerHeight };
+      shell.docH = document.documentElement ? document.documentElement.scrollHeight : 0;
+      shell.overflowY = shell.docH > shell.vh + 1 ? "shell-scrolls" : "ok";
+      shell.pageScroll = page ? { sw: page.scrollWidth, cw: page.clientWidth } : null;
+      shell.topH = Math.round((document.querySelector(".top") || { getBoundingClientRect: () => ({ height: 0 }) }).getBoundingClientRect().height);
+      return { items: items, bad: bad, ok: bad.length === 0, shell: shell };
+    },
+  };
+
   // 让页面模块也能记日志
   window.AppLog = log;
 })();
