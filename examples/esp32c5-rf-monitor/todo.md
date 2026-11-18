@@ -15,7 +15,7 @@
 | 0 | `feat/0-foundation` | `core/` 地基 + mock/假固件 + 43 条自测 | `[REVIEW]` 待人类验收 |
 | 1 | `feat/1-wifi-check` | WiFi 信道体检 | `[REVIEW]` 待人类验收（mock 判据 + 真机实测均已通过） |
 | 2 | `feat/2-waterfall` | 频谱瀑布图（PNG + HTML 翻页） | `[REVIEW]` 待人类验收 |
-| 3 | `feat/3-ble-risk` | BLE 风险与环境评估 | `[TODO]` |
+| 3 | `feat/3-ble-risk` | BLE 风险与环境评估 | `[REVIEW]` 待人类验收 |
 | 4 | `feat/4-guard-58g` | 5.8G 频段守卫 | `[TODO]` |
 | 5 | `feat/5-capture` | 可疑信号抓拍（含分类器） | `[TODO]` |
 
@@ -163,11 +163,30 @@ microwave/waterfall-p1.html 2.9 KB                 mixed/waterfall-p1.html 2.9 K
 3. **mock 逐 bin 抖动**：`SpectrumSynthesizer._is_on()` 按 bin 掷骰子，图上噪点感是 mock 特性。
 4. **上位机还没有瀑布图页**：`host/` 在 `feat/host-gui` 分支，本分支从阶段 0 切出无 `host/`。
 
-## [TODO] 3. BLE 风险与环境评估（feat/3-ble-risk）
+## [REVIEW] 3. BLE 风险与环境评估（feat/3-ble-risk）
 
-- 只加 `modes/ble_risk.py`。
+- 只加 `modes/ble_risk.py` + `tests/test_ble_risk.py` + `docs/03-ble-risk.md`（未动 `core/`、未动其它模块）。
 - 产出：BLE 广播信道（2402/2426/2480）活动度、拥挤度评分、与 WiFi 的共存提示。
 - 判据：`ble_crowded` 场景评分必须高于 `quiet`；`wifi_suppress_ble` 场景必须给出「被压制」判读。
+
+**已完成（数字都是实跑）**：
+
+- [x] 扫描计划 8 窗（3 广播信道中心对准 + 数据区 5 窗重叠滑扫），`data_slots()` 37 个数据信道栅格。
+- [x] 判据三原则：电平取 **p80**（脉冲不铺满 2 MHz）、窄带占比 ≥ 50%（防 WiFi 斜坡摊肩误判）、
+      肩部取左右 max（防不对称斜坡误判）。
+- [x] 宽带占用率改在**时间均值频谱**上算（单帧噪声抖动会让 37% 纯噪声 bin 越线）。
+- [x] WiFi 共存用双半宽（测电平 ±9 MHz / 判重叠 ±10 MHz），「在用」判据改成占用比例 ≥50%。
+- [x] mock 8 场景：quiet 4.9 → crowded **82.7**（密度型）→ suppress **23.8**（压制型）→ mixed 42.8 →
+      microwave 31.7 → wifi_busy 21.2 → unknown_cw 19.3 → video_58g 4.8。
+- [x] 实板 COM56 固定增益 60：45 s / 372 时间片 / 13262 帧 / 源错误 0，
+      判「WiFi 压制型（48.5）」，宽带占用 85%（房间本身 2.4G 很忙，见 `docs/03-ble-risk.md` §6）。
+- [x] `python -m unittest discover -s tests -t .` → **76 条 OK**（43 地基 + 33 本功能）。
+- [x] 顺手修地基里两条「`modes/` 必须为空」的断言（与功能分支共存冲突，功能 1 分支同款修法）。
+
+**未验证 / 待人类确认**：
+
+- 没在**安静房间**复核实板（房间是活的，清不了场）；安静侧只有 mock `quiet` 佐证。
+- 本分支 `app/live.py` 还没有 `--gain-index`（属功能 1 分支），实板验证用了不提交的临时脚本。
 
 ## [TODO] 4. 5.8G 频段守卫（feat/4-guard-58g）
 
