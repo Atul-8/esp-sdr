@@ -14,7 +14,8 @@ import sys
 import time
 from typing import Sequence
 
-from app import bind_store
+from app import bind_capture, bind_store
+from app.capture_link import CaptureAwareSource, iter_capture_plugins
 from core.registry import Registry, discover
 from core.scheduler import Scheduler
 from core.serial_link import EspSdrLink, SerialLinkError
@@ -84,8 +85,26 @@ def main(argv: Sequence[str] | None = None) -> int:
         bound = bind_store(registry, store)
         if bound:
             print(f"事件落库已绑定：{', '.join(bound)}")
-        scheduler = Scheduler(link, registry, store=store)
+        # 任务 5：抓档只能在两次扫描之间做 → 包一层 Source，扫描结束才清队列
+        cap_plugins = iter_capture_plugins(registry.plugins)
+        source: object = link
+        capture_source = None
+        if cap_plugins:
+            bound_cap = bind_capture(
+                registry,
+                lambda freq, samples, rate, bits: link.capture_iq(samples, rate, bits, freq),
+                out_dir=os.path.join(DEFAULT_DIR, "capture"),
+            )
+            capture_source = CaptureAwareSource(
+                link, cap_plugins, lambda freq, samples, rate, bits: link.capture_iq(samples, rate, bits, freq)
+            )
+            source = capture_source
+            if bound_cap:
+                print(f"抓档已绑定：{', '.join(bound_cap)} → {os.path.join(DEFAULT_DIR, 'capture')}")
+        scheduler = Scheduler(source, registry, store=store)  # type: ignore[arg-type]
         stats = scheduler.run(duration_s=args.duration)
+        if capture_source is not None:
+            capture_source.flush()  # 收尾再清一次，别把最后一轮排队的抓档丢了
         print()
         print(
             ascii_table(

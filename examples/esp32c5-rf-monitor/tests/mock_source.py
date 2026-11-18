@@ -151,6 +151,15 @@ SCENARIOS: dict[str, Scenario] = {
             _cw(5765.0, 86.0, 0.25),
         ],
     ),
+    "unknown_cw_clean": Scenario(
+        "unknown_cw_clean",
+        "干净频点上的未知窄带源（任务 5 抓拍判据）：WiFi ch1 + BLE 当背景，2454 MHz 一片没人的地方有一根 CW",
+        [
+            _wifi(2412, 80.0, 20.0, 0.7),
+            _ble(2426, 58.0, 0.4),
+            _cw(2454.0, 82.0),
+        ],
+    ),
     "mixed": Scenario(
         "mixed",
         "全场景混合：WiFi/BLE/微波炉/5.8G 图传/未知源（默认演示）",
@@ -242,6 +251,7 @@ class MockSource:
         realtime: bool = True,
         sleep: Callable[[float], None] = time.sleep,
         synthesizer: SpectrumSynthesizer | None = None,
+        virtual_step_s: float = 0.0,
     ) -> None:
         self.synth = synthesizer or SpectrumSynthesizer(scenario, seed)
         self.scenario = scenario
@@ -250,6 +260,11 @@ class MockSource:
         self.realtime = realtime
         self._sleep = sleep
         self._sleep_total = 0.0
+        #: 每帧额外推进的**假墙钟**（不真睡）。给「非实时但要在几秒内攒够跨度」的
+        #: 场景用：抓档的 ``MIN_SPAN_S`` 是按快照 ts 的跨度算的，非实时源默认
+        #: 所有帧挤在一起 → 永远攒不够 3 s → 矩阵里一条都抓不到（假红）。
+        self.virtual_step_s = max(0.0, float(virtual_step_s))
+        self._virtual_total = 0.0
         self._seq = 0
         self.scans = 0
 
@@ -258,7 +273,7 @@ class MockSource:
         for frame in range(self.frames_per_scan):
             self._seq += 1
             codes = self.synth.codes(request.freq_hz, request.bw_hz, request.bins)
-            now = time.time() + self._sleep_total
+            now = time.time() + self._sleep_total + self._virtual_total
             yield Snapshot(
                 ts=now,
                 center_hz=request.freq_hz,
@@ -277,6 +292,7 @@ class MockSource:
             if self.realtime and self.frame_interval_s:
                 self._sleep(self.frame_interval_s)
                 self._sleep_total += self.frame_interval_s
+            self._virtual_total += self.virtual_step_s
 
 
 def make_source(scenario: str = "mixed", realtime: bool = False, **kwargs: Any) -> MockSource:

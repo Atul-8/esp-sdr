@@ -25,4 +25,31 @@ def bind_store(registry: Any, store: Any) -> list[str]:
     return bound
 
 
-__all__ = ["bind_store"]
+def bind_capture(
+    registry: Any,
+    capture_fn: Any,
+    out_dir: str | None = None,
+) -> list[str]:
+    """把「真抓档函数」交给支持抓档的模块（有 ``capture_fn`` 槽位的），返回模块 id。
+
+    ``capture_fn(freq_hz, samples, rate_code, bits) -> 抓档对象``：真机是
+    ``link.capture_iq``，mock/demo 是 ``app.capture_link.synthetic_capture``。
+    模块自己不发串口命令 —— 真正的抓档由 ``CaptureAwareSource`` 在两次扫描之间执行。
+    """
+    bound: list[str] = []
+    if capture_fn is None:
+        return bound
+    for plugin in getattr(registry, "plugins", []):
+        if not hasattr(plugin, "capture_fn"):
+            continue
+        try:
+            plugin.capture_fn = capture_fn
+            if out_dir is not None and hasattr(plugin, "out_dir"):
+                plugin.out_dir = out_dir
+            bound.append(plugin.id)
+        except Exception:  # noqa: BLE001 - 只读属性的模块跳过
+            continue
+    return bound
+
+
+__all__ = ["bind_capture", "bind_store"]

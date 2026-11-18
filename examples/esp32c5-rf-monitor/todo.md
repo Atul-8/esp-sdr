@@ -17,8 +17,8 @@
 | 2 | `feat/2-waterfall` | 频谱瀑布图（PNG + HTML 翻页） | `[REVIEW]` 待人类验收 |
 | 3 | `feat/3-ble-risk` | BLE 风险与环境评估 | `[REVIEW]` 待人类验收（六档判词 + 仿真佐证 + 增益对照） |
 | 4 | `feat/4-guard-58g` | 5.8G 频段守卫 | `[REVIEW]` 待人类验收（13 窗滑扫 + 五类判词 + 告警日志 + 事件落库；真板空环境 1 条杂散 + 回放注入自证） |
-| 5 | `feat/5-capture` | 可疑信号抓拍（含分类器） | `[TODO]` |
-| T | `feat/host-gui` | 图形上位机（WebView，跨阶段工具，不占功能阶段） | `[REVIEW]` 待人类验收（含双击弹出预览 + 高度自适应 + 真全屏 + 独立窗口 + 2D 瀑布频率轴 + 周期瀑布图页） |
+| 5 | `feat/5-capture` | 可疑信号抓拍（含分类器） | `[REVIEW]` 待人类验收（四道门 + 真板 4 根杂散报清单不抓 + 3 条存证 + 抓档页/一键体检/场景矩阵 9/9 + 判据回放 7/7） |
+| T | `feat/host-gui` | 图形上位机（WebView，跨阶段工具，不占功能阶段） | `[REVIEW]` 待人类验收（含双击弹出预览 + 高度自适应 + 真全屏 + 独立窗口 + 2D 瀑布频率轴 + 周期瀑布图页 + 抓档页 + 一键体检） |
 
 ---
 
@@ -267,12 +267,75 @@ microwave/waterfall-p1.html 2.9 KB                 mixed/waterfall-p1.html 2.9 K
 - 空环境只有 1 条杂散作误报基线，没在**多房间/多时段**复测误报率。
 - 5.8G 频段守卫暂无专属 GUI 页面：告警表已能在上位机「原始输出」页（`pages/raw/`）看到。
 
-## [TODO] 5. 可疑信号抓拍（feat/5-capture）
+## [REVIEW] 5. 可疑信号抓拍（feat/5-capture）
 
-- 只加 `modes/capture.py` **和** `core/classifier.py` 的实现（任务书授权本阶段动 core 的只有这一处，需人类二次确认）。
-- 产出：按启发式分类（窄带连续/宽带突发/跳频样）触发 `CAP16`/`CAP20` 抓档，
-  落盘原始 I/Q + 元数据 + 分类结论。
-- 判据：`unknown_cw` 场景触发抓档且分类为「窄带持续」；`quiet` 场景不抓。
+任务书口径：按启发式分类（窄带连续 / 宽带突发 / 跳频样）触发 `CAP20` 抓档，
+落盘原始 I/Q + 元数据 + 分类结论。任务书授权本阶段动 `core/` 的**只有** `core/classifier.py`。
+
+交付物：
+
+- `core/classifier.py`：纯函数启发式分类（**无外部依赖**）。`SignalFeatures`（中心/宽度/占空/时长/峰值）
+  → `Classification(label, confidence, reason, notes)`。判定顺序 = **先判「分不分得清」再判「是哪一类」**：
+  `ambiguous → analog_video → wifi → ble → CW → unknown`。门槛全部集中在文件顶部常量表
+  （`AMBIGUOUS_MIN_BW_HZ=15e6` / `VIDEO_BW_RANGE_HZ=(4e6,8e6)` / `WIFI_MIN_BW_HZ=8e6` /
+  `BLE_BW_RANGE_HZ=(1e6,2.5e6)` / `CW_MAX_BW_HZ=500_000` 等）。
+- `modes/capture.py`：6 个 20MHz 重叠窗（`2410.0 / 2422.7 / … / 2473.5 MHz`，15MHz 步进）常驻缓冲，
+  均值谱平滑后按「相对抬升 + 占空 + 连续段宽度」判候选，`unknown` 才排队抓档。
+  四道过滤器：抽帧 `FRAME_MIN_GAP_S=0.2` / 最小跨度 `MIN_SPAN_S=3.0` / 环境饱和 `BUSY_FILL=0.35`
+  / 本机杂散 `SPUR_MAX_HZ=500 kHz & STEADY_FILL=0.75`。sidecar 带前后各 30s 上下文。
+- `app/capture_link.py`：`CaptureAwareSource`（抓档命令只在**两次扫描之间**落地）+ `FakeCapture`
+  （假固件用，三种「长相」`cw/wideband/burst` 按场景选，存档 IQ 本身带场景特征）。
+- `app/audit.py`：一分钟体检报告（`python -m app.audit --port COM56`）+ **只读当前会话**的
+  `summary()`（上位机「一键体检」用，不重扫、不新抓，`done` 永远 `False`）。
+- `testing/capture_real.py`：真板抓档实测脚本；`testing/scenario_matrix.py`：9 场景 × 4 模块矩阵；
+  `testing/capture_replay.py`：合成快照过四道门（判据自证，不依赖实物）。
+- `docs/05-capture.md`：判据推导、四道门、真板实测、边界与未验证项。
+
+验收标准 → 结果：
+
+| 验收项 | 判据 | 结果 |
+| --- | --- | --- |
+| 单测 | `python -m unittest discover -s . -p "test_*.py"` 0 失败 | ✅ **271 条 OK**（`test_capture` 43 / `test_capture_link` 14 / `test_classifier` / `test_audit` 28 合计） |
+| `unknown_cw_clean` 必抓 | 分类「持续凸起」+ 落盘 1 条 | ✅ `caps 1`、`trig 77`、sidecar `unknown 0.65` |
+| `quiet` 不抓 | 0 条 + 0 触发 | ✅ `caps 0 / trig 0` |
+| 环境饱和不抓 | `wifi_busy` 抓 0 条 | ✅ `skipped_busy 81`、`caps 0` |
+| 本机杂散报清单不抓 | `mixed` 出现 `spurs[]` 条目且 `skipped_spur > 0` | ✅ `skipped_spur 41`，`spurs[]` 逐根列 2455/2465/2427/2468 MHz |
+| 场景矩阵 | `python -m testing.scenario_matrix` 9 场景全 PASS | ✅ 9/9 PASS（含 5.8G「共享/单跑」双列） |
+| 判据自证 | `python -m testing.capture_replay` 7 用例全符合预期 | ✅ 7/7 PASS（clean_cw→抓；pure_spur→杂散；short_span→跨度门；crowded→饱和门；weak_narrow / edge_clipped→不抓；wideband_known→判 microwave 故不抓） |
+| 真板 CAP20 | 样本数 / 线上字节 / 存档字节三方自洽 + sha256 一致 | ✅ 16380 样本 = 979 µs @ 20 MS/s；线上 **40950 B**；存档 **65520 B**；`sha256` 一致；分类 `unknown 0.65` |
+| 上位机抓档页 | 表格 ≥1 行 / 过滤档 ≥7 / 门槛 ≥10 / 说明 ≥3 / 边界条 >30 字 / 探针 kind | ✅ `rows 1 / filters 7 / thresholds 16 / notes 13 / warn 175 / probe.kind capture / span > 0` |
+| 上位机一键体检 | 点按钮出四档结论 + 5 列来源表 + 4 条边界 | ✅ 探针 `audit "发现可疑信号并已抓档" / auditRows 6 / auditBoundary 4` |
+| 单射频配比公平 | 5 模块各 `slice_weight=1.0`，`share` 各 ≈0.2 | ✅ `waterfall_share` 门槛 0.3→0.15 且要求 `share["capture"] ≥ 0.15` |
+
+真板实测（2026-11-19，COM56，`--gain-index 60`，4 轮 60s 合计 15074 快照 / 266 片 / 错误 0）：
+
+- 4 根本机杂散（`real2.db`）：2455.0 / 2465.0 / 2427.0 / 2468.0 MHz，宽 0.156–0.27 MHz，fill 0.89–1.00，
+  peak 30–35 码，持续 37–52 s —— **全部落进 `spurs[]` 清单，只报不抓**。
+- spur 过滤后仍抓 3 条（`real3.db`）：2468.0 / 2410.0 / 2462.0 MHz，宽 **1.17 / 2.81 / 1.87 MHz**，
+  fill 0.88–0.92 → 都 **> `SPUR_MAX_HZ`(500 kHz)**，按设计不该被杂散门拦，属「比板载杂散宽的真可疑源」，
+  已存 IQ 待人工复核（`py -m testing.capture_real` 可回读）。
+- 体检报告 `.data/audit/audit-20261119-003957.json`：`headline 发现可疑信号并已抓档`、
+  `why` 逐个列频点并附「这不是确认是摄像头」、`sources` 17 条、`captures` 3 条、`boundaries` 4 条。
+
+**边界（产出物与文档里都写了）**：
+
+- 周期快照非连续实时：一轮 6 窗 ≈ 1 s（真板 3~4 s），「持续」是按采样到的帧算的。
+- 功率码是相对 dB 码，**不是 dBm**；不做任何 dBm 换算。
+- 单射频分时：抓档要独占射频 ~1 ms，只能安排在两次扫描之间，`max_per_slice=1`。
+- 分类器是**启发式**，不是识别器：只给「分得清/分不清 + 大概像什么」，BLE 只评概率不做设备级归因。
+- 抓档只收 `unknown`：16 MHz 平顶会被先判成 `microwave`（已知大类）→ **不抓**（`capture_replay` 有专门用例钉住）。
+- 窄带窃听器（CW）与板载杂散**物理上不可区分**：宽度 ≤500 kHz 一律当杂散，只报清单；
+  真可疑源只能靠「搬机靠近看会不会跟着变强」人工复核。
+- 抓档频率取整 MHz（固件 `FREQ` 只收整 MHz），偏 0.5 MHz 由 sidecar 里的 `candidate.center_hz` 兜底。
+- 「已存证」≠「确认是摄像头」：这句边界永远显示在抓档页顶部，不允许折进说明里。
+
+**未验证 / 待人类确认**：
+
+- **没有真实偷拍设备**做正样本：抓得到靠 mock `unknown_cw_clean` + 分类器判据 + 合成回放自证。
+- 一次抓档的 IO 开销（65520 B 落盘 + 串口 40950 B 传输）对**扫速**的影响只测过单次，没做长稳跑。
+- 抓档页只验过假固件自检 + 真板 `app.live`，**没在真板 + 上位机同时长跑**（自动增益 + 抓档 + 5 模块共存）验过。
+- `tests/fake_firmware.py` 的 `CAP` 系列仍是桩：自检跑通的是「应用层链路」，不是假固件真出 IQ。
+- 本阶段动了 `core/classifier.py`（任务书授权范围内），**仍需人类二次确认**。
 
 ## [REVIEW] T. 图形上位机 / WebView（feat/host-gui）
 
