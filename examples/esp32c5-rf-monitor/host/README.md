@@ -48,10 +48,14 @@ python host/app.py --port COM56 --gain-mode HARDWARE                   # 固件�
 # 2) 没板也能看：假固件 + 内置场景
 python host/app.py --mock --scenario wifi_busy
 
-# 3) 无人工干预自检（跑 8s → 走完五个页面 + 增益控件 → 打印 JSON 报告 → 退出码 0/2）
-python host/app.py --selftest --seconds 8 --shot out.png
+# 3) 无人工干预自检（跑 10s → 走完六个页面 + 增益控件 + 窗口缩放 → 打印 JSON 报告 → 退出码 0/2）
+python host/app.py --selftest --seconds 10 --shot out.png
 python host/app.py --selftest --real --port COM56 --gain-index 60 --seconds 12
-#    → 报告末尾 "checks": 40 项全 true，退出码 0（假固件与真板都验过）
+#    → 报告末尾 "checks": 44 项全 true，退出码 0（假固件与真板都验过）
+#    ⚠️ 别把 --seconds 压到 8：页面探针没跑完，画布/瀑布那几项会假红
+
+# 4) 指定窗口尺寸（验「窗口态也不裁按钮」）
+python host/app.py --mock --window-size 1024x680
 
 # 逻辑层自测（不开窗口）
 python -m unittest discover -s host/tests -t . -v
@@ -197,6 +201,28 @@ JS → Python 的入口：`listPorts()`、`scenarios()`、`renderText()`、
 `openFile(path)`（只在系统浏览器打开 `.data/` 下的产物，其它路径直接拒）、
 `uiReport(json)`（都在 `bridge.js` 里封装成 Promise）。
 
+## 窗口缩放（窗口态 / 最大化都不裁按钮）
+
+外壳是 CSS Grid：顶栏 `auto` 行、侧栏 `clamp(124px, 11vw, 176px)`、页面列
+`minmax(0, 1fr)`、页脚 `auto` 且 `max-height: 26vh`。三条硬约定：
+
+1. **顶栏允许换行**（`.top { flex-wrap: wrap; max-height: 42vh; overflow-y: auto }`）。
+   窗口变窄时「场景下拉 / 开始 / 停止 / EN」换到第二行，不许被挤出屏幕——
+   `html, body` 是 `overflow: hidden`，挤出去的元素**没有滚动条、也没有报错**。
+2. **只缩留白与字号，不隐藏任何可点控件**。`@media` 分 1680 / 1500 / 1280 /
+   1024 / 900 五档收间距，`max-height: 760px` 再收页脚；`brand-sub` 与
+   `gainbar__note` 是纯文案，可以隐，按钮/输入框/读数一律保留。
+3. **≤900px 侧栏改横向标签条**（`body` 换成单列网格），把整行宽度让给页面。
+
+自检里对应检查项是 `layout_shrink`：`Layout.probe()`（`web/js/app.js`）用
+`getBoundingClientRect()` 量顶栏 12 个控件（串口 / 增益条 / 三个模式按钮 /
+加减档 / 假固件 / 场景 / 开始 / 停止 / EN / 状态灯 / 侧栏 / 页脚）四边是否越界，
+`run_selftest.layout_test()` 依次把窗口缩到 **1280×800 → 1024×680 → 900×620 →
+760×560**，任何一档有元素越界就把它（带越界像素数）写进 `report["layout_bad"]`，
+该项即假。实测四档全部 `bad: []`，顶栏在 1280 宽时自动变两行（`topH 73`）。
+
+> 只量「在不在可视区」，不判断好不好看——截图仍只存盘不判读。
+
 ## 增益调控（顶栏三段 + 自动闭环，`host/gain.py`）
 
 顶栏 `AGC | 手动 | 自动` 三段按钮 + `− 档号 +` 步进 + `目标` 输入框，作用的是
@@ -322,6 +348,7 @@ index 是 **PHY 表项**，既不等于 dB 也不线性。
 | 弹出/放大后画布高度一点没变，下面一大片空白 | 页面 resize 钩子用 `root.querySelector("#spec-canvas")`，面板被搬到 `body` 下的浮层后就不在 `root` 里了 → 拿到 `null` 抛 `TypeError`，整段重绘中断 | 浮层挂到 `#page-container` 内（`position: fixed`，视觉不变），`fitCanvas(null)` 也返回空对象不再抛错 |
 | 点「全屏」没反应，布局跟普通窗口一模一样 | 合成点击没有用户手势，Chromium 拒 `requestFullscreen()`（`QtWebEngine` 的 `fullScreenRequested` 压根没触发） | 全屏走 `Bridge.setFullscreen` → Python `win.showFullScreen()`；DOM API 只作纯浏览器兜底 |
 | 独立窗口里画面空白/不刷新 | 新窗口晚连上，`QWebChannel` 之前的信号全丢了 | `runtime()` 带回最后 `spectrum`/`tables`，`syncRuntime()` 直接回放；`HostWindow` 缓存两份 JSON |
+| 窗口态 / 最大化切换后「开始 / 停止 / EN」看不见，最大化才出来 | 外壳 `html, body { overflow: hidden }` + 顶栏固定 `52px` 高、`flex:none` 不换行：内容总宽 > 窗口宽时，最右边那几个按钮直接被裁掉，**既没有滚动条也不报错**；页面列又写成 `1fr`（= `minmax(auto,1fr)`），宽表格能把整页撑宽 | 顶栏 `flex-wrap: wrap` + 行高 `auto` + `max-height: 42vh`；页面列 `minmax(0, 1fr)`；`@media` 五档收间距（只收留白/字号，不隐藏控件）；≤900px 侧栏改横向条。自检新增 `layout_shrink`：4 档窗口宽逐个量越界像素（`report["layout_bad"]`） |
 | 点自检必崩：`Windows fatal exception: stack overflow`，exit=127，**没有 Python 回溯**，主线程停在 `app.exec()` | `finish()` 是模块级函数 `run_selftest(...)` 里的闭包，里面误用了 `self.session` / `self.runner`：`self` 在该作用域根本不存在 → `NameError` 在 Qt 回调里抛出，PySide6 直接进程级栈溢出。包在 `try/except` 里的那半段更阴——异常被吞掉，`share` 一直是 `{}` | 闭包里一律 `window.xxx`；**别在主线程读正在跑的 `QThread` 实例属性**，用窗口持有的普通 dict（`stats_box`）中转收集线程的数据 |
 | 瀑布图页「没数据」但后端在读射频：一轮 4.4 s 实际走了 5 分钟 | `slice_weight` 悬殊（`wifi_check=40.0` vs `waterfall=0.8`），平滑加权轮询把射频几乎全给了 wifi，share 实测 `{waterfall: 0.016}` | 单射频共享要**公平配比**：两边都 `slice_weight = 1.0`（各半），selftest 的 `share`/`waterfall_share` 项守着（实测 0.5 / 0.5） |
 | 扫频进度条上 5G 整段消失、`visited` 只到 5 | 进度条跟了「字典序第一个」计划，`ble_risk` 只扫 2.4G 8 窗 | 取**跨度最宽**的计划（`widestPlan()`，并列按 id 排序），不是第一个 |

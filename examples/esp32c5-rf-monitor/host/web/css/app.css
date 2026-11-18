@@ -26,8 +26,11 @@ html, body {
 
 body {
   display: grid;
-  grid-template-columns: 168px 1fr;
-  grid-template-rows: 52px 1fr 92px;
+  /* 侧栏随窗口收放；页面列用 minmax(0,1fr) 才能真的收缩
+     （写成 1fr 时画布/宽表格会把整页撑出可视区，按钮就被挤到屏幕外）。
+     行高用 auto：顶栏在窄窗口会换行变高，用固定 52px 会把第二行切掉。 */
+  grid-template-columns: clamp(124px, 11vw, 176px) minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr) auto;
   grid-template-areas:
     "top top"
     "side page"
@@ -39,8 +42,14 @@ body {
   grid-area: top;
   display: flex;
   align-items: center;
-  gap: 18px;
-  padding: 0 14px;
+  /* 窗口变窄时换行，而不是把右边的按钮挤出可视区（html/body 是 overflow:hidden） */
+  flex-wrap: wrap;
+  row-gap: 4px;
+  column-gap: clamp(8px, 1.2vw, 18px);
+  padding: 6px clamp(8px, 1vw, 14px);
+  min-height: 52px;
+  max-height: 42vh;          /* 极端窄屏：顶栏自己滚，不许吞掉整页 */
+  overflow-y: auto;
   background: linear-gradient(180deg, #16203180, #0b0f16);
   border-bottom: 1px solid var(--line);
 }
@@ -48,7 +57,15 @@ body {
 .brand { font-size: 15px; font-weight: 600; letter-spacing: .3px; white-space: nowrap; }
 .brand-sub { margin-left: 8px; font-size: 11px; font-weight: 400; color: var(--fg-dim); }
 
-.controls { display: flex; align-items: center; gap: 10px; flex: 1; }
+.controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  row-gap: 6px;
+  column-gap: clamp(6px, .8vw, 10px);
+  flex: 1 1 420px;           /* 空间不够就整块换到第二行，不要压扁子控件 */
+  min-width: 0;
+}
 
 .field { display: flex; align-items: center; gap: 6px; color: var(--fg-dim); font-size: 12px; white-space: nowrap; }
 .field select, .field input[type="number"] {
@@ -117,7 +134,7 @@ body {
 .side .nav-item .hint { display: block; font-size: 11px; color: var(--fg-dim); }
 
 /* ── 页面 ───────────────────────────────────────────── */
-.page { grid-area: page; position: relative; overflow: auto; padding: 12px; }
+.page { grid-area: page; position: relative; overflow: auto; padding: clamp(8px, 1vw, 12px); min-width: 0; min-height: 0; }
 
 .panel {
   background: var(--bg-2);
@@ -167,6 +184,8 @@ canvas.plot { display: block; width: 100%; border-radius: 8px; background: #070a
 .popout__bar {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
+  row-gap: 4px;
   gap: 10px;
   padding: 6px 12px;
   background: var(--bg-2);
@@ -192,12 +211,14 @@ body.solo { grid-template-areas: "page"; grid-template-columns: 1fr; grid-templa
 .foot {
   grid-area: foot;
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 10px;
   padding: 8px 12px;
   background: var(--bg-2);
   border-top: 1px solid var(--line);
   overflow: hidden;
+  min-height: 92px;
+  max-height: 26vh;
 }
 .kv { display: flex; flex-wrap: wrap; gap: 4px 14px; font: 11px/1.5 var(--mono); color: var(--fg-dim); align-content: flex-start; }
 .kv b { color: var(--fg); font-weight: 500; }
@@ -259,3 +280,69 @@ pre.raw { margin: 0; font: 11px/1.45 var(--mono); color: var(--fg); white-space:
 .big-risk[data-risk="heavy"] { color: var(--err); }
 .big-risk[data-risk="flat"] { color: #c4b5fd; }
 .warn-box { border: 1px solid #6b5a2c; background: #241f0e; color: #fcd34d; border-radius: 8px; padding: 7px 10px; font: 12px/1.5 var(--mono); margin-bottom: 10px; }
+
+/* ── 响应式：窗口态 / 最大化 / 拖小 都不许把按钮挤出可视区 ─────────────
+   原则：
+   1. 只缩「留白 + 字号 + 小间距」，**不隐藏任何可点控件**（隐藏=功能消失）。
+   2. 装不下就换行（顶栏 flex-wrap），换行也不许把页面顶出屏幕（顶栏 max-height 自己滚）。
+   3. 页面列已经 minmax(0,1fr)，宽表格/画布在 .page 内部横向滚，不撑宽外壳。
+   验证：python host/app.py --selftest 会依次把窗口缩到 1280/1024/900/760 宽，
+        用 Layout.probe() 逐个量按钮是否还完整落在可视区内（layout_shrink 检查）。
+   ------------------------------------------------------------------ */
+@media (max-width: 1680px) {
+  .brand-sub { display: none; }          /* 纯副标题，去掉不影响任何操作 */
+}
+@media (max-width: 1500px) {
+  .gainbar__note { display: none; }      /* 增益的补充说明，读数仍在 */
+  .top { column-gap: 10px; }
+  .btn { padding: 5px 11px; }
+  .status { padding: 5px 10px; font-size: 11px; }
+}
+@media (max-width: 1280px) {
+  .brand { font-size: 14px; }
+  .field { font-size: 11px; gap: 4px; }
+  .field select { min-width: 78px; font-size: 11px; padding: 3px 5px; }
+  .btn { padding: 4px 9px; font-size: 11.5px; }
+  .btn--primary, .btn:not(.btn--mini):not(.btn--ghost) { padding: 4px 10px; }
+  .gainbar { gap: 4px; padding: 2px 5px; }
+  .gainbar__label { font-size: 10px; }
+  .gainbar input[type="number"], .gainbar__target input[type="number"] { width: 42px; padding: 2px 4px; }
+  .gainbar__read { min-width: 0; font-size: 10.5px; }
+  .gainbar__target { font-size: 10px; }
+  .seg__btn { padding: 3px 7px; font-size: 11px; }
+  .foot { min-height: 80px; }
+}
+@media (max-width: 1024px) {
+  body { font-size: 12px; }
+  .top { row-gap: 3px; }
+  .controls { row-gap: 4px; column-gap: 6px; flex-basis: 340px; }
+  .gainbar { padding: 1px 4px; }
+  .kv { gap: 3px 10px; }
+  .foot { grid-template-columns: minmax(0, 1fr); min-height: 70px; max-height: 32vh; }
+  .log { max-height: 13vh; }
+}
+/* 窄窗口：侧栏改横向标签条，把整行宽度让给页面 */
+@media (max-width: 900px) {
+  body {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto auto minmax(0, 1fr) auto;
+    grid-template-areas: "top" "side" "page" "foot";
+  }
+  .side {
+    display: flex;
+    gap: 6px;
+    padding: 6px 8px;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+  .side .nav-item { width: auto; white-space: nowrap; padding: 5px 10px; }
+  .side .nav-item .hint { display: none; }
+}
+/* 矮窗口（最大化后拖矮 / 小屏）：页脚与顶栏再收一档，始终给主内容留高度 */
+@media (max-height: 760px) {
+  .foot { min-height: 66px; max-height: 20vh; }
+  .log { max-height: 12vh; }
+  .scanbar__canvas { height: 56px; }
+}

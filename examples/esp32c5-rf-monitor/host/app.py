@@ -867,6 +867,11 @@ def run_selftest(app: QApplication, view: QWebEngineView, window: HostWindow, ar
             "waterfall_share": float(share.get("waterfall", 0) or 0)
             >= (0.85 / max(1, len(share) or 1))
             and float(share.get("capture", 0) or 0) >= (0.85 / max(1, len(share) or 1)),
+            # 窗口缩放：4 档尺寸（1280/1024/900/760 宽）下顶栏按钮都完整落在可视区。
+            # 见 layout_test：只要有一档有元素越界，bad 里就有它（带越界像素数）。
+            "layout_shrink": len(report.get("layout") or {}) >= 4
+            and not (report.get("layout_bad") or {})
+            and all(bool((v or {}).get("ok")) for v in (report.get("layout") or {}).values()),
             "waterfall_render": bool((report.get("waterfall_render") or {}).get("open"))
             and len(str((report.get("waterfall_render") or {}).get("files", ""))) > 10,
         }
@@ -911,9 +916,62 @@ def run_selftest(app: QApplication, view: QWebEngineView, window: HostWindow, ar
             elif nxt:
                 QTimer.singleShot(400, lambda: stage(nxt[0]))
             else:
-                finish()
+                # 页面全探完，最后量一遍「缩放」：见 layout_test 注释
+                layout_test(finish)
 
         QTimer.singleShot(1800, probe)
+
+    def layout_test(then) -> None:
+        """窗口缩放实测：把窗口依次拖小，量顶栏每个按钮是否还完整落在可视区。
+
+        为什么要在自检里做：外壳是 `overflow:hidden` 的定宽网格，窗口一变窄，
+        右边的「开始/停止/EN」会被挤到屏幕外且**不报错、不滚动条**——只能靠量。
+        判据看的是 `getBoundingClientRect()` 四边是否越界，不是「看不见就算了」。
+        每一档都顺手看一眼 `.page` 是否被撑宽（页面里宽表格应内部滚，不许撑外壳）。
+        """
+        sizes = [(1280, 800), (1024, 680), (900, 620), (760, 560)]
+        results: dict[str, object] = {}
+        restore = (view.width(), view.height())
+
+        def step(i: int) -> None:
+            if i >= len(sizes):
+                report["layout"] = results
+                view.resize(restore[0], restore[1])
+                bad = {
+                    k: (v or {}).get("bad")
+                    for k, v in results.items()
+                    if isinstance(v, dict) and (v.get("bad") or [])
+                }
+                steps.append(
+                    "窗口缩放：" + json.dumps(
+                        {k: (v or {}).get("ok") for k, v in results.items()}, ensure_ascii=False
+                    )
+                )
+                report["layout_bad"] = bad
+                then()
+                return
+            w, h = sizes[i]
+
+            def collect(result: object, tag: str = f"{w}x{h}") -> None:
+                try:
+                    payload = json.loads(str(result)) if result else {}
+                except Exception:  # noqa: BLE001
+                    payload = {"parse_error": str(result)}
+                if isinstance(payload, dict):
+                    payload["window"] = [view.width(), view.height()]
+                results[tag] = payload
+                QTimer.singleShot(220, lambda: step(i + 1))
+
+            def grab() -> None:
+                view.page().runJavaScript(
+                    "JSON.stringify(window.Layout ? Layout.probe() : {missing:1})", 0, collect
+                )
+
+            view.resize(w, h)
+            # 等一次窗口 resize 事件把画布/进度条重排完，再量，否则量到的是旧布局
+            QTimer.singleShot(420, grab)
+
+        step(0)
 
     def gain_test(then) -> None:
         """顶栏增益控件实操：切手动 → 升一档 → 切自动，读回状态与显示。
