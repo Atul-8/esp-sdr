@@ -24,3 +24,9 @@ bool burst_serial_stop_requested(void);
  * owns the receiver: the other gets "ERR busy" until the owner sends RELEASE
  * or stays silent for five seconds. RELEASE itself is answered here. */
 void burst_serial_serve(void (*handle)(char *line));
+
+/* Same as burst_serial_serve, but calls `idle` on every poll that produced no
+ * complete command. `idle` returns true when it did work, in which case the
+ * loop skips its 1 ms delay (otherwise the delay keeps the idle path cheap).
+ * Used by the device-side sweep state machine. */
+void burst_serial_serve_idle(void (*handle)(char *line), bool (*idle)(void));

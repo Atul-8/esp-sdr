@@ -157,6 +157,48 @@ static size_t pack_spectrum(unsigned n, unsigned log2n, unsigned det, unsigned m
     return HEADER_BYTES + n + 4;
 }
 
+/* 单帧版：不驻留、不累计，一个窗口一帧。刻意与 SPEC 的循环体保持同一套运算
+ * （同窗口函数、同 DC 处理、同 pack_spectrum），差别只在于「只算一帧就返回」。 */
+bool spectrum_sweep_frame(unsigned n, unsigned rate_code, unsigned detector, unsigned freq_mhz,
+                          spectrum_acquire_fn acquire) {
+    if (n < 256 || n > MAX_FFT || (n & (n - 1)) || !rate_hz(rate_code) || detector > 1) return false;
+    spectrum_fft_init();
+    if (!ready) return false;
+    if (setup_n != n) {
+        for (unsigned j = 0; j < n; j++) window[j] = (int16_t)lrintf(16383.5f * (1 - cosf(2 * M_PI * j / n)));
+        setup_n = n;
+    }
+    unsigned log2n = 0;
+    while ((1u << log2n) < n) log2n++;
+    char text[192];
+    snprintf(text, sizeof(text), "SPEC %u %u %u %u" "\n", n, rate_hz(rate_code), n, freq_mhz);
+    if (!send_text(text)) return false;
+    const uint32_t *words;
+    unsigned elapsed;
+    if (!acquire(n, rate_code, &words, &elapsed)) return false;
+    uint8_t gain = (uint8_t)(words[0] >> 20);
+    for (unsigned j = 0; j < n; j++) {
+        int32_t i = ((int32_t)(words[j] << 22) >> 22), q = ((int32_t)(words[j] << 12) >> 22);
+        fft_data[2 * j] = clamp16((i * window[j]) >> 9);
+        fft_data[2 * j + 1] = clamp16((q * window[j]) >> 9);
+    }
+    uint32_t frames = 0;
+    spectrum_output_t out = {.frames = &frames, .progress = esp_timer_get_time()};
+    spectrum_fft_poll(fft_data, n, dsps_fft_w_table_sc16, pump_spectrum, &out);
+    spectrum_dc_t dc = {0};
+    spectrum_dc_apply(&dc, fft_data, n);
+    for (unsigned j = 0; j < n; j++) {
+        uint32_t p = spectrum_complex_power(fft_data[2 * j], fft_data[2 * j + 1]);
+        if (detector) {
+            if (p > powers.maximum[j]) powers.maximum[j] = p;
+        } else
+            powers.mean[j] = (float)p;
+    }
+    uint64_t index = (uint64_t)esp_timer_get_time() * rate_hz(rate_code) / 1000000u;
+    size_t size = pack_spectrum(n, log2n, detector, 1, frames, index, gain);
+    return burst_serial_send(frame, size);
+}
+
 bool spectrum_command(const char *line, unsigned frequency_mhz, spectrum_acquire_fn acquire) {
     unsigned dc_mode;
     char dc_extra;

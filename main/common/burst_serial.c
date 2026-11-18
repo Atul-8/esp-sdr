@@ -247,7 +247,7 @@ static void serve_reply(const char *text) {
     (void)burst_serial_send(text, strlen(text));
 }
 
-void burst_serial_serve(void (*handle)(char *line)) {
+void burst_serial_serve_idle(void (*handle)(char *line), bool (*idle)(void)) {
     char line[128];
     int owner = -1;
     int64_t lease_deadline = 0;
@@ -255,6 +255,7 @@ void burst_serial_serve(void (*handle)(char *line)) {
         if (esp_timer_get_time() >= lease_deadline) owner = -1;
         int status = burst_serial_poll_line(line, sizeof(line));
         if (!status) {
+            if (idle && idle()) continue;
             vTaskDelay(1);
             continue;
         }
@@ -278,3 +279,5 @@ void burst_serial_serve(void (*handle)(char *line)) {
         lease_deadline = esp_timer_get_time() + 5000000;
     }
 }
+
+void burst_serial_serve(void (*handle)(char *line)) { burst_serial_serve_idle(handle, NULL); }

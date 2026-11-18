@@ -28,6 +28,7 @@
 #include "burst_gpio.h"
 #include "burst_version.h"
 #include "spectrum.h"
+#include "scan_fsm.h"
 #if CONFIG_IDF_TARGET_ESP32C61 || CONFIG_IDF_TARGET_ESP32C6
 #include "ring_capture.h"
 #endif
@@ -214,6 +215,21 @@ static bool spectrum_acquire(unsigned n, unsigned rate, const uint32_t **data, u
     return ok;
 }
 
+/* 扫频状态机（main/common/scan_fsm.c）要的两件事：换频、在当前频点出一帧。
+ * 都走主机发 FREQ/SPEC 时完全相同的那两条路径（同样的 prepare_rx 与
+ * spectrum_acquire），因此设备自扫的每一帧与主机逐窗驱动时逐位可比。 */
+static bool fsm_tune(unsigned mhz) {
+    if (!frequency_valid(mhz)) return false;
+    frequency_mhz = mhz;
+    rx_ready = false;
+    prepare_rx();
+    return true;
+}
+
+static bool fsm_frame(unsigned bins, unsigned rate, unsigned detector, unsigned mhz) {
+    return spectrum_sweep_frame(bins, rate, detector, mhz, spectrum_acquire);
+}
+
 #include "ring_probe.h"
 
 static bool capture(unsigned n, unsigned divider, unsigned format) {
@@ -310,7 +326,9 @@ void app_main(void) {
     (void)usb_serial_jtag_wait_tx_done(pdMS_TO_TICKS(100));
     ESP_ERROR_CHECK(usb_serial_jtag_driver_uninstall());
     burst_serial_init();
-    burst_serial_serve(handle_command);
+    static const scan_fsm_ops_t fsm_ops = {fsm_tune, fsm_frame};
+    scan_fsm_register(&fsm_ops);
+    burst_serial_serve_idle(handle_command, scan_fsm_idle);
 }
 
 #define BURST_MAX_RATE (CONFIG_IDF_TARGET_ESP32C6 ? 6 : 5)
@@ -330,6 +348,7 @@ static void handle_command(char *line) {
     if (filter_probe_command(line)) return;
 #endif
     if (limits_command(line)) return;
+    if (scan_fsm_command(line)) return;
     if (gain_command(line)) return;
     if (burst_common_command(line)) return;
     unsigned n;
@@ -338,7 +357,7 @@ static void handle_command(char *line) {
     if (!strcmp(line, "CAPS")) {
         reply(
             "CAPS VERSION GPIO SPEC SPECN SPECCAPS SPECSTAT DCT UARTBAUD RXLIMITS GAIN HWAGC IQ8 SERIALLEASE"
-            " TUNEEXT"
+            " TUNEEXT FSM"
 #if CONFIG_IDF_TARGET_ESP32C6
             " RX40 RX16"
 #else
