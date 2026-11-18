@@ -2,7 +2,8 @@
 
 跑法（在本目录 ``host/`` 下）：
 
-    python -m unittest discover -s tests -t . -v
+    python tests/test_session.py -v          # 直接跑文件（不要用 -m unittest discover：
+                                             # host/tests 会遮蔽分析层的 tests 包）
 """
 from __future__ import annotations
 

@@ -49,7 +49,7 @@ class RegistryTests(unittest.TestCase):
             self.registry.register(object())  # type: ignore[arg-type]
 
     def test_discover_empty_package_is_allowed(self):
-        # 空目录不是错误：用临时空包验证，避免被真实 modes/ 的内容干扰。
+        # 空目录不是错误：用临时空包验证，避免被真实 modes/ 的内容干扰（功能分支会往里加模块）。
         import pathlib
         import sys
         import tempfile
