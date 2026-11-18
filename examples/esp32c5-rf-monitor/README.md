@@ -18,10 +18,14 @@ examples/esp32c5-rf-monitor/
 │   ├── store.py          #   SQLite 主存档 + CSV 旁路双写
 │   ├── registry.py       #   ModePlugin 契约 + modes/ 自动发现
 │   └── classifier.py     #   启发式分类器接口（任务 5 才实现）
-├── modes/                # 五个功能各占一个文件（现在为空，由功能分支各自添加）
+├── modes/                # 五个功能各占一个文件（功能分支各自添加）
+│   └── waterfall.py      #   任务 2：三频段轮扫 + 环形缓冲 + produce()（本分支）
 ├── output/               # 输出基础件（表格/单位格式化），各功能再自带实现
-├── tests/                # mock 快照源 + 假固件 + 43 条无硬件自测
-├── app/                  # demo（mock 全链路）与 live（真机/假固件）
+│   ├── format.py         #   表格/单位格式化
+│   ├── png.py            #   零依赖 PNG 编码器 + 5×7 点阵（任务 2）
+│   └── heatmap.py        #   时频热力图 PNG + HTML 翻页（任务 2）
+├── tests/                # mock 快照源 + 假固件 + 无硬件自测（本分支 82 条）
+├── app/                  # demo（mock 全链路）/ live（真机·假固件）/ waterfall（瀑布图 CLI）
 ├── docs/                 # 阶段说明、任务书副本、验收记录
 └── todo.md               # 唯一任务事实源
 ```
@@ -35,6 +39,11 @@ python -m app.demo                      # mock 全链路：注册→调度→收
 python -m app.demo --scenario ble_crowded  # 场景清单见 tests/mock_source.py:SCENARIOS
 python -m app.demo --weights "wifi_check:40,ble_risk:30,guard_58g:20,capture:10"
 python -m unittest discover -s tests -t . -v    # 全量自测
+
+# 任务 2：周期性频谱瀑布图（10 分钟等效 mock 数据 → PNG + HTML 翻页）
+python -m app.waterfall --minutes 10 --scenario mixed --ascii
+#   产物：.data/waterfall/index.html + waterfall-pN.png/html
+#   边界：**周期快照，非连续实时**；功率码是相对 dB 码（0..255），不是 dBm
 ```
 
 `python -m app.demo --help` 有全部参数；产物落在 `.data/`（已被 gitignore）。
