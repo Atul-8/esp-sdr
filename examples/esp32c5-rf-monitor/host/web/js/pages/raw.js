@@ -5,6 +5,7 @@ window.Pages.raw = (function () {
   let root = null;
   let textTimer = null;
   let tablesSeen = 0;
+  let lastTables = null;
 
   function onEnter(host) {
     root = host;
@@ -26,7 +27,9 @@ window.Pages.raw = (function () {
   }
 
   function onTables(tables) {
-    if (!root || !tables || !tables.plugins) return;
+    if (!tables || !tables.plugins) return;
+    lastTables = tables;
+    if (!root) return;
     tablesSeen += 1;
     const box = root.querySelector("#raw-tables");
     box.innerHTML = "";
@@ -37,7 +40,7 @@ window.Pages.raw = (function () {
       const head = document.createElement("div");
       head.className = "panel__head";
       head.innerHTML = '<span class="panel__title">' + plugin.name + " · " + plugin.id +
-        '</span><span class="panel__hint">权重 ' + plugin.weight + "</span>";
+        '</span><span class="panel__hint">' + esc(T("raw.weight", { w: plugin.weight })) + "</span>";
       panel.appendChild(head);
 
       if (plugin.error) {
@@ -54,12 +57,12 @@ window.Pages.raw = (function () {
       } else {
         const empty = document.createElement("div");
         empty.className = "muted";
-        empty.textContent = "该模块暂无表格产出（看下面的 ASCII 输出或还没开始扫）";
+        empty.textContent = T("raw.empty");
         panel.appendChild(empty);
       }
       box.appendChild(panel);
     });
-    if (!tables.plugins.length) box.innerHTML = '<div class="muted">没有模块</div>';
+    if (!tables.plugins.length) box.innerHTML = '<div class="muted">' + esc(T("raw.noModules")) + "</div>";
   }
 
   function buildTable(table) {
@@ -88,5 +91,14 @@ window.Pages.raw = (function () {
     return el;
   }
 
-  return { onEnter, onLeave, onTables, probe: () => ({ tablesSeen: tablesSeen }) };
+  function esc(text) {
+    return String(text).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  }
+
+  /** 语言切换：静态部分是 data-i18n 自动翻，动态部分（面板/表格）重画一次 */
+  function onLang() {
+    if (root && lastTables) onTables(lastTables);
+  }
+
+  return { onEnter, onLeave, onTables, onLang, probe: () => ({ tablesSeen: tablesSeen }) };
 })();

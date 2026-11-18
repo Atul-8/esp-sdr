@@ -2,16 +2,22 @@
   {
     "id": "spectrum",
     "title": "实时频谱",
-    "hint": "曲线 + 3D 瀑布"
+    "hint": "曲线 + 3D 瀑布",
+    "title_en": "Live spectrum",
+    "hint_en": "curve + 3D waterfall"
   },
   {
     "id": "wifi",
     "title": "WiFi 信道体检",
-    "hint": "相对抬升排序"
+    "hint": "相对抬升排序",
+    "title_en": "WiFi survey",
+    "hint_en": "sorted by excess"
   },
   {
     "id": "raw",
     "title": "原始输出",
-    "hint": "任意模块表格兜底"
+    "hint": "任意模块表格兜底",
+    "title_en": "Raw output",
+    "hint_en": "any module's table"
   }
 ]

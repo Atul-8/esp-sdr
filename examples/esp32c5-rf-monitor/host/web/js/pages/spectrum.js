@@ -1,13 +1,26 @@
-/* pages/spectrum.js —— 实时频谱：2D 曲线 + 3D 瀑布 + 2D 瀑布。 */
+/* pages/spectrum.js —— 实时频谱：2D 曲线 + 3D 瀑布 + 2D 瀑布。
+ *
+ * 2D 瀑布的实现要点（之前坏过，别再改回去）：
+ *   · 数据缓冲区是**独立画布** `wf.data`（宽 = 画布物理宽，高 = WF_ROWS 行），
+ *     每帧把整块下移 1 行、顶部写新行；缓冲里**只放颜色，不画任何文字**。
+ *   · 合成到可见画布时用 `setTransform(1,0,0,1,0,0)` 走**物理像素**再 drawImage。
+ *     旧版按 CSS 像素拷贝自身，dpr=2 时每帧只拷左上 1/4 再放大 → 画面糊成一团、
+ *     文字被反复复制成重影。
+ *   · 文字（"最新"、频率刻度、色码范围）在合成之后才画，永远不参与滚动。
+ *   · 对比度按本帧 min/max 自适应（噪声底 20~70 码时固定 0..255 会全变深蓝）。
+ */
 window.Pages = window.Pages || {};
 
 window.Pages.spectrum = (function () {
-  const WF_ROWS = 180;      // 2D 瀑布保留的行数（每帧一行）
+  const WF_ROWS = 240;      // 2D 瀑布保留的帧数（1 帧 = 1 行）
   const PEAK_DECAY = 0.35;  // 峰值保持每帧衰减（码）
 
   let root = null;
-  let spec = null;          // {canvas, ctx, width, height}
-  let wf2d = null;
+  let spec = null;          // {canvas, ctx, width, height, dpr}
+  let scanbar = null;       // 扫频进度条（游标）
+  let info = null;          // 最近一次 info（含各模块的扫描计划）
+  let planModule = null;    // 扫描计划当前对应的模块 id
+  let wf2d = null;          // 见 makeWaterfall()
   let waterfall3d = null;
   let peak = null;
   let lastPayload = null;
@@ -16,23 +29,19 @@ window.Pages.spectrum = (function () {
 
   function onEnter(host) {
     root = host;
-    const specCanvas = host.querySelector("#spec-canvas");
-    const wfCanvas = host.querySelector("#wf-canvas");
-    spec = U.fitCanvas(specCanvas, 210);
-    wf2d = U.fitCanvas(wfCanvas, 150);
-    wf2d.ctx.fillStyle = "#070a10";
-    wf2d.ctx.fillRect(0, 0, wf2d.width, wf2d.height);
+    spec = U.fitCanvas(host.querySelector("#spec-canvas"), 210);
+    wf2d = makeWaterfall(host.querySelector("#wf-canvas"), 150);
     peak = null;
-    lastPayload = null;
 
-    const box = host.querySelector("#wf-3d");
-    waterfall3d = new Three3D.Waterfall(box, { nFreq: 96, nTime: 110 });
-    if (waterfall3d.ok) waterfall3d.resize();
+    scanbar = new ScanBar(host.querySelector("#scanbar"));
+    applyPlan();
 
+    waterfall3d = new Three3D.Waterfall(host.querySelector("#wf-3d"), { nFreq: 96, nTime: 110 });
+
+    root.querySelector("#wf2d-title").textContent = T("spectrum.wf2d.title", { rows: WF_ROWS });
     if (lastPayload) onSpectrum(lastPayload);
-    redraw();
+    else drawSpectrum(null);
 
-    // 窗口拉伸：节流后重算画布尺寸
     window.addEventListener("resize", onResize);
   }
 
@@ -41,9 +50,11 @@ window.Pages.spectrum = (function () {
     resizeTimer = setTimeout(() => {
       if (!root) return;
       spec = U.fitCanvas(root.querySelector("#spec-canvas"), 210);
-      wf2d = U.fitCanvas(root.querySelector("#wf-canvas"), 150);
+      wf2d = makeWaterfall(root.querySelector("#wf-canvas"), 150); // 尺寸变了就丢弃历史，避免拉伸
       if (waterfall3d && waterfall3d.ok) waterfall3d.resize();
-      redraw();
+      if (scanbar) scanbar.resize();
+      drawSpectrum(lastPayload);
+      drawWaterfall2D(lastPayload);
     }, 180);
   }
 
@@ -51,36 +62,174 @@ window.Pages.spectrum = (function () {
     window.removeEventListener("resize", onResize);
     if (waterfall3d) waterfall3d.dispose();
     waterfall3d = null;
+    if (scanbar) scanbar.dispose();
+    scanbar = null;
+    planModule = null;
+    wf2d = null;
     root = null;
   }
 
+  // ---- 2D 瀑布 -----------------------------------------------------------
+  function makeWaterfall(canvas, cssHeight) {
+    const fit = U.fitCanvas(canvas, cssHeight);
+    const data = document.createElement("canvas");
+    data.width = Math.max(1, canvas.width);
+    data.height = WF_ROWS;
+    const dctx = data.getContext("2d");
+    dctx.fillStyle = "#070a10";
+    dctx.fillRect(0, 0, data.width, data.height);
+    return {
+      fit: fit,
+      data: data,
+      dctx: dctx,
+      row: dctx.createImageData(data.width, 1),
+      range: new U.AutoRange(14, 0.25),
+      frames: 0,
+    };
+  }
+
+  function pushWaterfall(payload) {
+    if (!wf2d || !payload || !payload.bins || !payload.bins.length) return;
+    const bins = payload.bins;
+    const W = wf2d.data.width;
+    wf2d.range.update(bins);
+    const px = wf2d.row.data;
+    for (let x = 0; x < W; x++) {
+      const idx = Math.min(bins.length - 1, Math.floor((x / W) * bins.length));
+      const c = U.heatRGB(wf2d.range.norm(bins[idx]));
+      const o = x * 4;
+      px[o] = c[0]; px[o + 1] = c[1]; px[o + 2] = c[2]; px[o + 3] = 255;
+    }
+    // 整体下移一行（自拷贝，缓冲区里没有文字，不会留下重影）
+    wf2d.dctx.drawImage(wf2d.data, 0, 0, W, WF_ROWS - 1, 0, 1, W, WF_ROWS - 1);
+    wf2d.dctx.putImageData(wf2d.row, 0, 0);
+    wf2d.frames += 1;
+  }
+
+  function drawWaterfall2D(payload) {
+    if (!wf2d) return;
+    const { ctx, width, height, dpr } = wf2d.fit;
+    ctx.save();
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, width, height);
+    ctx.fillStyle = "#070a10";
+    ctx.fillRect(0, 0, width, height);
+    ctx.restore();
+
+    const padT = 15;
+    const padB = 15;
+    const plotH = Math.max(8, height - padT - padB);
+
+    // 数据：物理像素直出，关闭插值，保证一行一帧
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(
+      wf2d.data,
+      0, 0, wf2d.data.width, WF_ROWS,
+      0, Math.round(padT * dpr), Math.round(width * dpr), Math.round(plotH * dpr)
+    );
+    ctx.restore();
+
+    ctx.font = "10px Consolas, monospace";
+    // 顶部左侧：最新
+    ctx.fillStyle = "rgba(7,10,16,0.72)";
+    const latest = T("spectrum.latest");
+    ctx.fillRect(3, 3, ctx.measureText(latest).width + 8, 12);
+    ctx.fillStyle = "#8697b4";
+    ctx.fillText(latest, 7, 12);
+
+    if (!payload || !payload.bins || !payload.bins.length) return;
+
+    // 顶部右侧：本帧自适应范围（只影响显示，判决仍用相对抬升口径）
+    const [lo, hi] = wf2d.range.span;
+    const rangeText = T("spectrum.range", { lo: lo, hi: hi });
+    ctx.fillStyle = "rgba(7,10,16,0.72)";
+    ctx.fillRect(width - ctx.measureText(rangeText).width - 11, 3, ctx.measureText(rangeText).width + 8, 12);
+    ctx.fillStyle = "#8697b4";
+    ctx.fillText(rangeText, width - ctx.measureText(rangeText).width - 7, 12);
+
+    // 横轴频率刻度（和上面的 2D 曲线同一根轴）
+    const fLo = payload.freq_lo_hz, fHi = payload.freq_hi_hz;
+    ctx.textAlign = "center";
+    for (let k = 0; k <= 4; k++) {
+      const x = (width * k) / 4;
+      const f = fLo + ((fHi - fLo) * k) / 4;
+      ctx.fillStyle = "#5f7391";
+      const label = (f / 1e6).toFixed(0);
+      ctx.fillText(label, Math.min(width - 16, Math.max(16, x)), height - 4);
+    }
+    ctx.textAlign = "left";
+
+    // 当前帧峰值位置的竖线（和曲线上的黄点对齐）
+    let maxIdx = 0;
+    for (let i = 1; i < payload.bins.length; i++) if (payload.bins[i] > payload.bins[maxIdx]) maxIdx = i;
+    const px = (maxIdx / Math.max(1, payload.bins.length - 1)) * width;
+    ctx.strokeStyle = "rgba(251,191,36,0.55)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(px, padT + 2);
+    ctx.lineTo(px, padT + plotH - 2);
+    ctx.stroke();
+  }
+
+  // ---- 扫描计划（来自 Python 的 scan_requests，前端不写死频段）-------------
+  function applyPlan(moduleId) {
+    if (!scanbar || !info) return;
+    const plans = info.plans || {};
+    const ids = Object.keys(plans);
+    if (!ids.length) return;
+    const id = moduleId && plans[moduleId] ? moduleId : ids[0];
+    if (id === planModule) return;
+    planModule = id;
+    scanbar.setPlan(id, plans[id]);
+  }
+
+  function onInfo(payload) {
+    info = payload;
+    applyPlan(planModule);
+  }
+
+  // ---- 数据入口 ----------------------------------------------------------
   function onSpectrum(payload) {
     if (!payload || !payload.bins) return;
     lastPayload = payload;
     drawn += 1;
 
-    // ---- 峰值保持（按新帧长度重置） ----
     if (!peak || peak.length !== payload.bins.length) {
       peak = payload.bins.slice();
     } else {
-      for (let i = 0; i < peak.length; i++) {
-        peak[i] = Math.max(payload.bins[i], peak[i] - PEAK_DECAY);
-      }
+      for (let i = 0; i < peak.length; i++) peak[i] = Math.max(payload.bins[i], peak[i] - PEAK_DECAY);
     }
 
+    if (payload.module && payload.module !== planModule) applyPlan(payload.module);
+    if (scanbar) scanbar.update(payload);
     if (waterfall3d && waterfall3d.ok) waterfall3d.push(payload.bins);
+    pushWaterfall(payload);
     drawWaterfall2D(payload);
     drawSpectrum(payload);
   }
 
+  // ---- 2D 曲线 -----------------------------------------------------------
   function drawSpectrum(payload) {
     if (!spec) return;
     const { ctx, width, height } = spec;
-    const bins = payload.bins;
     const padL = 46, padR = 8, padT = 10, padB = 22;
     const plotW = Math.max(10, width - padL - padR);
     const plotH = Math.max(10, height - padT - padB);
 
+    ctx.clearRect(0, 0, width, height);
+    ctx.fillStyle = "#070a10";
+    ctx.fillRect(0, 0, width, height);
+    ctx.font = "10px Consolas, monospace";
+
+    if (!payload || !payload.bins || !payload.bins.length) {
+      ctx.fillStyle = "#5f7391";
+      ctx.fillText(T("wifi.card.wait"), padL, padT + 16);
+      return;
+    }
+
+    const bins = payload.bins;
     let lo = 255, hi = 0;
     for (const v of bins) { if (v < lo) lo = v; if (v > hi) hi = v; }
     lo = Math.max(0, Math.min(lo, hi - 8) - 4);
@@ -89,14 +238,9 @@ window.Pages.spectrum = (function () {
     const xOf = (i) => padL + (i / Math.max(1, bins.length - 1)) * plotW;
     const yOf = (v) => padT + plotH - ((v - lo) / (hi - lo)) * plotH;
 
-    ctx.clearRect(0, 0, width, height);
-    ctx.fillStyle = "#070a10";
-    ctx.fillRect(0, 0, width, height);
-
     // 网格 + 纵轴刻度
     ctx.strokeStyle = "#16233a";
     ctx.fillStyle = "#5f7391";
-    ctx.font = "10px Consolas, monospace";
     ctx.lineWidth = 1;
     for (let k = 0; k <= 4; k++) {
       const v = lo + ((hi - lo) * k) / 4;
@@ -116,7 +260,7 @@ window.Pages.spectrum = (function () {
       ctx.fillText(label, x - ctx.measureText(label).width / 2, height - 7);
     }
     ctx.fillStyle = "#5f7391";
-    ctx.fillText("MHz", width - padR - 22, height - 7);
+    ctx.fillText(T("spectrum.mhz"), width - padR - 24, height - 7);
 
     // 峰值保持线
     if (peak) {
@@ -153,51 +297,83 @@ window.Pages.spectrum = (function () {
     ctx.fillStyle = "#fbbf24";
     ctx.beginPath(); ctx.arc(px, py, 3, 0, Math.PI * 2); ctx.fill();
     const peakFreq = fLo + ((fHi - fLo) * maxIdx) / Math.max(1, bins.length - 1);
-    const text = (peakFreq / 1e6).toFixed(2) + " MHz / 码 " + bins[maxIdx].toFixed(0);
+    const text = T("spectrum.peak", { freq: (peakFreq / 1e6).toFixed(2) + " MHz", code: bins[maxIdx].toFixed(0) });
+    ctx.fillStyle = "#fbbf24";
     ctx.fillText(text, Math.min(px + 6, width - padR - ctx.measureText(text).width), Math.max(12, py - 8));
 
-    // 角标：模块 / 增益 / 帧号
+    // 角标：模块 / 中心 / 带宽 / 点数
     ctx.fillStyle = "#8697b4";
-    const tag = (payload.module ? payload.module + " · " : "") +
-      "中心 " + (payload.center_hz / 1e6).toFixed(1) + " MHz · 带宽 " +
-      (payload.bw_hz / 1e6).toFixed(0) + " MHz · " + payload.raw_bins + " bin → " + bins.length + " 点";
-    ctx.fillText(tag, padL + 4, padT + 11);
+    ctx.fillText(
+      T("spectrum.tag", {
+        module: payload.module || "-",
+        center: (payload.center_hz / 1e6).toFixed(1) + " MHz",
+        bw: (payload.bw_hz / 1e6).toFixed(0) + " MHz",
+        raw: payload.raw_bins,
+        out: bins.length,
+      }),
+      padL + 4,
+      padT + 11
+    );
   }
 
-  function drawWaterfall2D(payload) {
-    if (!wf2d) return;
-    const { ctx, width, height } = wf2d;
-    const rowH = Math.max(1, Math.floor(height / WF_ROWS));
-    // 整体下移一行
-    ctx.drawImage(ctx.canvas, 0, 0, width, height - rowH, 0, rowH, width, height - rowH);
-    // 顶上写最新一行
-    const bins = payload.bins;
-    for (let x = 0; x < width; x++) {
-      const idx = Math.min(bins.length - 1, Math.floor((x / width) * bins.length));
-      ctx.fillStyle = U.heat(bins[idx]);
-      ctx.fillRect(x, 0, 1, rowH);
+  /**
+   * 2D 瀑布自检：直接从**数据缓冲**读像素，证明「每帧真的多了一行、旧行真的在下移」。
+   * 只给 selftest 用，正常运行时不会调用（读 2MB 像素很贵）。
+   */
+  function wfStats() {
+    if (!wf2d) return null;
+    const W = wf2d.data.width;
+    const img = wf2d.dctx.getImageData(0, 0, W, WF_ROWS).data;
+    const rowMean = (row) => {
+      let sum = 0;
+      const base = row * W * 4;
+      for (let x = 0; x < W; x += 7) sum += img[base + x * 4] + img[base + x * 4 + 1] + img[base + x * 4 + 2];
+      return Math.round(sum / Math.ceil(W / 7));
+    };
+    const means = [];
+    let painted = 0;
+    let distinct = 0;
+    let prev = null;
+    for (let r = 0; r < WF_ROWS; r++) {
+      const m = rowMean(r);
+      means.push(m);
+      if (m > 60) painted += 1;                    // 背景 #070a10 三通道和 ≈ 33，画过的行明显更高
+      if (prev !== null && Math.abs(m - prev) > 1) distinct += 1;
+      prev = m;
     }
-    ctx.fillStyle = "#8697b4";
-    ctx.font = "10px Consolas, monospace";
-    ctx.fillText("最新", 4, 11);
-    ctx.fillText((payload.freq_lo_hz / 1e6).toFixed(0) + " MHz", 4, height - 4);
-    const right = (payload.freq_hi_hz / 1e6).toFixed(0) + " MHz";
-    ctx.fillText(right, width - ctx.measureText(right).width - 4, height - 4);
+    const avg = (arr) => arr.reduce((a, b) => a + b, 0) / Math.max(1, arr.length);
+    return {
+      rows: WF_ROWS,
+      frames: wf2d.frames,
+      paintedRows: painted,
+      distinctRows: distinct,
+      topMean: Math.round(avg(means.slice(0, 8))),      // 最新 8 行
+      bottomMean: Math.round(avg(means.slice(-8))),     // 最旧 8 行
+      flatRows: means.filter((m) => m <= 40).length,
+      imagesTooMany: img.length / 4 !== W * WF_ROWS,
+    };
   }
 
-  function redraw() {
-    if (lastPayload) drawSpectrum(lastPayload);
+  // ---- 语言切换 -----------------------------------------------------------
+  function onLang() {
+    if (!root) return;
+    root.querySelector("#wf2d-title").textContent = T("spectrum.wf2d.title", { rows: WF_ROWS });
+    drawSpectrum(lastPayload);
+    drawWaterfall2D(lastPayload);
+    if (scanbar) scanbar.draw();
   }
 
   return {
     onEnter,
     onLeave,
     onSpectrum,
-    probe: () => ({ frames: drawn, three: three3dInfo() }),
+    onLang,
+    onInfo,
+    probe: () => ({
+      frames: drawn,
+      scanbar: scanbar ? scanbar.probe() : null,
+      wf2d: wf2d ? Object.assign({ rows: WF_ROWS, range: wf2d.range.span }, wfStats()) : null,
+      three: waterfall3d && waterfall3d.ok ? { pushFrames: waterfall3d.frames } : { ok: false },
+    }),
   };
-
-  function three3dInfo() {
-    if (!waterfall3d || !waterfall3d.ok) return { ok: false };
-    return { ok: true, pushFrames: waterfall3d.frames, revision: THREE.REVISION || "?" };
-  }
 })();

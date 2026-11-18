@@ -145,6 +145,10 @@ BAND_5_HZ    = (5_170_000_000, 5_835_000_000)   # → 44 个窗：5180…5825，
 人类需求原文：「做一个测试上位机，参考 `MagicRobot_V0.1/host` 用 webview 3D 引擎，
 以后换别的实验只需要换网页」。
 
+上位机**可以脱离仓库独立运行**：项目根 `E:\_00AE_PROJECR\esp32c5_sdr_app\host\` 是工作副本，
+靠 `host/paths.py` 定位分析层（`ESPSDR_SRC` 环境变量 > `host/src` 自包含副本 > 向上 4 层找
+`repo/examples/esp32c5-rf-monitor`）。`ESPSDR_SRC` 一旦设了就是权威值，指错立刻抛错不静默回退。
+
 交付物：
 
 - `host/app.py`：`QWebEngineView` + `QWebChannel` 桥（所有 Python→JS 信号都是 JSON 字符串）
@@ -153,20 +157,30 @@ BAND_5_HZ    = (5_170_000_000, 5_835_000_000)   # → 44 个窗：5180…5825，
   `open/step/spectrum/tables/render_text`、`downsample_bins`（按桶取最大值，保窄带峰）
 - `host/web/`：`index.html` + 路由 + 三个页面（实时频谱 / WiFi 体检 / 原始输出）+
   本地 three.js r128（离线可用）
-- `host/tests/test_session.py`：15 条无窗口自测
+- `host/paths.py`：定位分析层（`ESPSDR_SRC` 权威值 > `host/src` > 向上 4 层）
+- `host/web/js/i18n.js` + `--lang zh|en`：外壳文案中英切换（模块自产表格沿用模块语言）
+- `host/web/js/scanbar.js`：扫频进度条（频段地图 + 回卷游标，数据来自 `info.plans`）
+- `host/tests/test_session.py`：23 条无窗口自测
 - `host/README.md`：跑法、数据契约、**新增实验页的四步**、边界、踩坑表
 
 验收标准 → 结果：
 
 | 验收项 | 判据 | 结果 |
 | --- | --- | --- |
-| 逻辑层自测 | `python -m unittest discover -s host/tests -t .` 0 失败 | ✅ 15 passed |
-| 无人工自检（假固件） | `python host/app.py --selftest --seconds 8 --shot out.png` 退出码 0 | ✅ 退出码 0，7/7 checks |
-| 频谱页真的在画 | 收到帧 > 0 且 2D/3D 画布非黑比例 > 1% | ✅ 186 帧；spec 32.2% / 3D 5.9% / 2D 瀑布 83.9% |
+| 逻辑层自测 | `cd host && python -m unittest discover -s tests -t tests` 0 失败 | ✅ 23 passed |
+| 无人工自检（假固件） | `python app.py --selftest --seconds 8 --shot out.png` 退出码 0 | ✅ 退出码 0，**13/13 checks** |
+| 频谱页真的在画 | 收到帧 > 0 且 2D/3D 画布非黑比例 > 1% | ✅ 188 帧；spec 24.7% / 3D 10.1% / 2D 瀑布 11.6% |
+| **2D 瀑布真的在滚** | 缓冲行数 240；`paintedRows ≥ 10`、`distinctRows ≥ 0.9×frames`、顶部均值 > 底部 + 100 | ✅ `paintedRows 35 / frames 35 / distinctRows 32 / topMean 291 / bottomMean 33` |
+| **扫频进度条：分段** | 从 `info.plans` 自动切段，至少 2 段、总窗数 > 10 | ✅ `2.4G`（2402–2482，5 窗）+ `5G`（5170–5835，44 窗）= 49 窗 |
+| **扫频进度条：游标** | 游标在轨道内、已走过 ≥ 3 个窗 | ✅ `index 44 / visited 18 / x 1043 ≤ 1208`；像素实测琥珀色游标列 `1172 → 1673 → 343（回卷）→ 938` |
+| **扫频进度条：回卷** | 喂到最后一窗再喂第一窗：轮次 +1、本轮覆盖清零 | ✅ `passesAfterWrap 2 / visitedAfterWrap 1 / indexAtEnd 3` |
+| **中英切换** | 切 `en` 后导航、状态栏、扫频条文案都变；`level` 数据值仍走显示层翻译 | ✅ `navLabels` 含 `Live spectrum`；`shell = ["Scan progress (band map)", "now 5180 MHz · window 6/49 · pass 2", "Heavy"]` |
 | WiFi 页真的在判 | 表格行 > 5、推荐信道有值、说明 ≥ 3 条 | ✅ 38 行；推荐 ch11 +17dB 拥挤；4 条说明 |
-| 原始页真的在输出 | 至少 1 个模块面板 + ASCII 文本 > 40 字符 | ✅ 1 面板 / 1 表 / 4365 字符 |
+| 原始页真的在输出 | 至少 1 个模块面板 + ASCII 文本 > 40 字符 | ✅ 1 面板 / 1 表 / 4364 字符 |
 | 换实验不改 Python | 新页面只加 `web/pages/<id>/page.html` + `registry.json` 一行 | ✅ 三页共用同一个 `app.py`，`router.js` 不认具体页名 |
-| 真板可跑 | `--selftest --real --port COM56 --gain-index 60` 退出码 0 | ✅ 207 帧 / 38 行 / 推荐 ch11 +4dB 空闲 |
+| 独立目录 | 上位机放项目根 `host/`，不依赖 `repo/` 的相对位置 | ✅ `paths.find_source()` 解析到 `…
+epo\examples\esp32c5-rf-monitor`；`ESPSDR_SRC=/tmp` 正确抛错 |
+| 真板可跑 | `--selftest --real --port COM56` 退出码 0 | ✅ 180 帧 / 38 行 / 推荐 ch11 +4dB 空闲 / 13 checks 全绿 |
 | 边界一致 | 界面上「功率码不是 dBm」「周期快照」「固定增益才可比」 | ✅ 纵轴/提示/说明页脚都写了 |
 
 未覆盖（必须诚实标注）：
@@ -174,6 +188,10 @@ BAND_5_HZ    = (5_170_000_000, 5_835_000_000)   # → 44 个窗：5180…5825，
 - **只在 Windows + Qt 6.12 上验过**；Linux/macOS 没测。
 - 3D 视图**没有自动对比度/色标校准**，只是同一色带映射；不做定量判读。
 - 页面刷新率受采集线程节流（20fps），**不是**固件原始帧率。
+- 扫频进度条的**段名**（2.4G / 5G）是前端按频率猜的纯装饰标签，判据全部来自
+  `info.plans`；游标位置只反映「正在读哪个窗」，不表示覆盖质量。
+- 真机实测扫速 ≈ **4 窗/秒**（瓶颈是串口解析 1024 点，不是 100ms 驻留），一轮 49 窗约 12s；
+  假固件补节奏后 ≈ 8–10 窗/秒。
 
 遗留（可选优化）：
 

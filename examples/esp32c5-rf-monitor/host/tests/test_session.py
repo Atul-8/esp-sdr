@@ -1,15 +1,67 @@
 """上位机逻辑层自测（不需要开窗口，也不需要真板）。
 
-跑法（在 ``examples/esp32c5-rf-monitor`` 下）：
+跑法（在本目录 ``host/`` 下）：
 
-    python -m unittest discover -s host/tests -t . -v
+    python -m unittest discover -s tests -t . -v
 """
 from __future__ import annotations
 
 import json
+import os
+import sys
 import unittest
 
-from host.session import HostConfig, HostSession, downsample_bins, list_ports, to_json
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+
+import paths  # noqa: E402 - 本地上位机模块
+
+paths.ensure_on_path()  # 让 session.py 能 import core/tests
+
+from session import LANGS, MESSAGES, HostConfig, HostSession, downsample_bins, list_ports, to_json, tr  # noqa: E402
+
+
+class SourceDirTests(unittest.TestCase):
+    """上位机独立目录后，靠 paths.py 找到 Python 分析层（core/ modes/）。"""
+
+    def test_find_source_has_registry(self):
+        found = paths.find_source()
+        self.assertTrue((found / "core" / "registry.py").is_file())
+        self.assertTrue((found / "modes").is_dir())
+
+    def test_env_override_wins(self):
+        old = os.environ.get(paths.ENV_VAR)
+        os.environ[paths.ENV_VAR] = str(paths.HOST_DIR)
+        try:
+            self.assertEqual(paths.candidates()[0], paths.HOST_DIR)
+            with self.assertRaises(RuntimeError):  # 该目录不是分析层 → 明确报错
+                paths.find_source()
+        finally:
+            if old is None:
+                os.environ.pop(paths.ENV_VAR, None)
+            else:
+                os.environ[paths.ENV_VAR] = old
+
+
+class I18nTests(unittest.TestCase):
+    """界面文案：中文必须有，英文可缺但 key 必须一致（缺了退回中文，绝不抛）。"""
+
+    def test_langs(self):
+        self.assertEqual(LANGS, ("zh", "en"))
+        self.assertTrue(all(k in MESSAGES for k in LANGS))
+
+    def test_en_covers_zh_keys(self):
+        missing = sorted(set(MESSAGES["zh"]) - set(MESSAGES["en"]))
+        self.assertEqual(missing, [], f"英文缺这些键：{missing}")
+
+    def test_tr_and_fallback(self):
+        self.assertIn("已停止", tr("zh", "stopped"))
+        self.assertIn("Stopped", tr("en", "stopped"))
+        self.assertEqual(tr("fr", "stopped"), tr("zh", "stopped"))  # 未知语言退回中文
+        self.assertEqual(tr("zh", "no_such_key"), "no_such_key")     # 未知 key 原样返回
+        self.assertIn("ch1", tr("zh", "started", what="ch1"))
 
 
 class ConfigTests(unittest.TestCase):
@@ -27,6 +79,14 @@ class ConfigTests(unittest.TestCase):
         self.assertTrue(cfg.mock)
         self.assertEqual(cfg.scenario, "quiet")
         self.assertEqual(cfg.bins_out, 128)
+
+    def test_lang_default_and_override(self):
+        self.assertEqual(HostConfig.from_json("{}").lang, "zh")
+        self.assertEqual(HostConfig.from_json(to_json({"lang": "EN"})).lang, "en")
+
+    def test_unknown_lang_rejected(self):
+        with self.assertRaises(ValueError):
+            HostConfig.from_json(to_json({"lang": "fr"}))
 
     def test_unknown_key_rejected(self):
         with self.assertRaises(ValueError):
@@ -114,6 +174,23 @@ class SessionTests(unittest.TestCase):
         allowed = {"重度", "拥挤", "轻度", "空闲", "无覆盖"}
         for channel in payload["channels"]:
             self.assertIn(channel["level"], allowed)
+
+    def test_describe_carries_scan_plans(self):
+        """扫频进度条靠这个画频段地图：必须是 [[中心频点, 带宽], ...] 的扫描顺序表。"""
+        info = self.session.open(HostConfig.from_json(to_json({"mock": True, "scenario": "wifi_busy"})))
+        plans = info.get("plans") or {}
+        self.assertIn("wifi_check", plans)
+        plan = plans["wifi_check"]
+        self.assertEqual(len(plan), 49, "5 个 2.4G 窗 + 44 个 5G 窗")
+        self.assertEqual(plan[0], [2_412_000_000, 20_000_000])
+        self.assertEqual(plan[-1], [5_825_000_000, 20_000_000])
+        # 扫描顺序 = 频点升序（2.4G 先、5G 后），前端据此判「到终点回卷」
+        centers = [item[0] for item in plan]
+        self.assertEqual(centers, sorted(centers))
+        self.assertEqual(len(set(centers)), 49)
+        for entry in plan:
+            self.assertEqual(len(entry), 2)
+            self.assertEqual(entry[1], 20_000_000)
 
     def test_render_text_matches_cli_shape(self):
         self.session.open(HostConfig.from_json(to_json({"mock": True, "scenario": "quiet"})))

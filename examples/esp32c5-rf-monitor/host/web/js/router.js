@@ -45,7 +45,9 @@ window.Router = (function () {
       const btn = document.createElement("button");
       btn.className = "nav-item";
       btn.dataset.page = page.id;
-      btn.innerHTML = page.title + (page.hint ? '<span class="hint">' + page.hint + "</span>" : "");
+      const title = I18N.entry("title", page);
+      const hint = I18N.entry("hint", page);
+      btn.innerHTML = title + (hint ? '<span class="hint">' + hint + "</span>" : "");
       btn.addEventListener("click", () => navigate(page.id));
       nav.appendChild(btn);
     });
@@ -67,7 +69,7 @@ window.Router = (function () {
     try {
       html = await loadText("pages/" + pageId + "/page.html");
     } catch (err) {
-      html = '<div class="error-box">页面片段加载失败：' + String(err.message || err) + "</div>";
+      html = '<div class="error-box">页面片段加载失败 / failed to load fragment: ' + String(err.message || err) + "</div>";
     }
     host.innerHTML = html;
     host.scrollTop = 0;
@@ -88,10 +90,22 @@ window.Router = (function () {
     }
   }
 
+  /** 语言切换：重画导航 + 让当前页自己重画动态部分 */
+  function relabel() {
+    renderNav();
+    if (current) {
+      mark(current.id);
+      dispatch("Lang", I18N.lang());
+    }
+  }
+
+  window.addEventListener("langchange", relabel);
+
   return {
     init,
     navigate,
     dispatch,
+    relabel,
     get current() { return current; },
     get pages() { return registry; },
   };

@@ -1,37 +1,61 @@
 <div class="cards" id="wifi-cards">
-  <div class="card"><div class="card__label">2.4G 推荐信道</div><div class="card__value" id="rec24">—</div><div class="card__note" id="rec24-note">等待样本</div></div>
-  <div class="card"><div class="card__label">5G 推荐信道</div><div class="card__value" id="rec5">—</div><div class="card__note" id="rec5-note">等待样本</div></div>
-  <div class="card"><div class="card__label">建议避开</div><div class="card__value" id="avoid" style="font-size:15px;">—</div><div class="card__note">相对抬升最高的 3 个</div></div>
-  <div class="card"><div class="card__label">有明显抬升的信道</div><div class="card__value" id="interf" style="font-size:15px;">—</div><div class="card__note">轻度以上；不代表一定是 WiFi</div></div>
+  <div class="card">
+    <div class="card__label" data-i18n="wifi.card.rec24">2.4G 推荐信道</div>
+    <div class="card__value" id="rec24">—</div>
+    <div class="card__note" id="rec24-note" data-i18n="wifi.card.wait">等待样本</div>
+  </div>
+  <div class="card">
+    <div class="card__label" data-i18n="wifi.card.rec5">5G 推荐信道</div>
+    <div class="card__value" id="rec5">—</div>
+    <div class="card__note" id="rec5-note" data-i18n="wifi.card.wait">等待样本</div>
+  </div>
+  <div class="card">
+    <div class="card__label" data-i18n="wifi.card.avoid">建议避开</div>
+    <div class="card__value" id="avoid" style="font-size:15px;">—</div>
+    <div class="card__note" data-i18n="wifi.card.avoidNote">相对抬升最高的 3 个</div>
+  </div>
+  <div class="card">
+    <div class="card__label" data-i18n="wifi.card.interf">有明显抬升的信道</div>
+    <div class="card__value" id="interf" style="font-size:15px;">—</div>
+    <div class="card__note" data-i18n="wifi.card.interfNote">轻度以上；不代表一定是 WiFi</div>
+  </div>
 </div>
 
 <div class="panel">
   <div class="panel__head">
-    <span class="panel__title">信道体检（按相对抬升降序）</span>
-    <span class="panel__hint" id="wifi-sample">等待样本</span>
+    <span class="panel__title" data-i18n="wifi.title">信道体检（按相对抬升降序）</span>
+    <span class="panel__hint" id="wifi-sample" data-i18n="wifi.card.wait">等待样本</span>
   </div>
   <div class="panel__body">
     <table class="chtable">
       <thead>
         <tr>
-          <th>#</th><th>信道</th><th>频段</th><th>中心</th><th>相对抬升</th><th>占用条</th>
-          <th>占空</th><th>峰值码</th><th>覆盖</th><th>分档</th>
+          <th data-i18n="wifi.col.rank">#</th>
+          <th data-i18n="wifi.col.channel">信道</th>
+          <th data-i18n="wifi.col.band">频段</th>
+          <th data-i18n="wifi.col.center">中心</th>
+          <th data-i18n="wifi.col.excess">相对抬升</th>
+          <th data-i18n="wifi.col.bar">占用条</th>
+          <th data-i18n="wifi.col.occupancy">占空</th>
+          <th data-i18n="wifi.col.peak">峰值码</th>
+          <th data-i18n="wifi.col.coverage">覆盖</th>
+          <th data-i18n="wifi.col.level">分档</th>
         </tr>
       </thead>
-      <tbody id="wifi-rows"><tr><td colspan="10" class="muted">还没有数据：点顶部「开始」</td></tr></tbody>
+      <tbody id="wifi-rows"><tr><td colspan="10" class="muted" data-i18n="wifi.waitData">还没有数据：点顶部「开始」</td></tr></tbody>
     </table>
   </div>
 </div>
 
 <div class="panel">
   <div class="panel__head">
-    <span class="panel__title">信道相对抬升（3D）</span>
-    <span class="panel__hint">高度 = 比本频段最安静信道高多少 dB；颜色 = 分档；鼠标可旋转</span>
+    <span class="panel__title" data-i18n="wifi.3d.title">信道相对抬升（3D）</span>
+    <span class="panel__hint" data-i18n="wifi.3d.hint">高度 = 比本频段最安静信道高多少 dB；颜色 = 分档；鼠标可旋转</span>
   </div>
   <div class="panel__body" id="wifi-3d" style="height: 240px;"></div>
 </div>
 
 <div class="panel">
-  <div class="panel__head"><span class="panel__title">判读说明</span></div>
-  <ul class="notes" id="wifi-notes"><li class="muted">等待样本</li></ul>
+  <div class="panel__head"><span class="panel__title" data-i18n="wifi.notes.title">判读说明</span></div>
+  <ul class="notes" id="wifi-notes"><li class="muted" data-i18n="wifi.card.wait">等待样本</li></ul>
 </div>

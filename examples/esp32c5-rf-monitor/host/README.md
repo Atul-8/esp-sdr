@@ -62,13 +62,32 @@ Windows 上也可以双击 `host/start.bat`（缺依赖会自动 `pip install`�
    window.Pages["<id>"] = {
      onEnter(root) {},            // 片段注入后调用，root 就是 #page-container
      onLeave() {},                // 切走时清理计时器/事件监听
-     onSpectrum(payload) {},      // 每帧频谱（~20fps）
+     onInfo(payload) {},          // 开流/换扫描计划一次（含 plans，画频段条用）
+    onSpectrum(payload) {},      // 每帧频谱（~20fps）
      onTables(payload) {},        // 每 1s 的表格式产出
      probe() { return {}; },      // 可选：给 --selftest 的报告里加一段
    };
    ```
    然后在 `index.html` 的 `<script>` 列表里加一行（这是唯一的 Python 之外的手工步骤）。
 4. 没写 JS 也能跑：`raw` 页面会把任何模块的 `Output` 表格渲染出来。
+
+## 扫频进度条（`web/js/scanbar.js`）
+
+频谱页最上面那条横条就是「扫到哪了」：左边一段是 2.4G、右边一段是 5G，
+每一小格 = 扫描计划里的一个 20MHz 窗，游标停在该窗的中心频点上；扫到最右端
+**回卷**到最左端继续下一轮，底部细条是本轮已覆盖的窗数。
+
+- **频段边界和窗位置都不是写死的**，来自 `info.plans[<module>]`（Python 侧
+  `scan_requests()` 的 `[[中心频点, 带宽], ...]`，按扫描顺序）。前端按「相邻窗
+  频率跳跃 > 3 倍窗宽」自动切段并命名（2.4G / 5G / #n），换实验不用改 JS。
+- 横轴是**分段线性**的：2.4G 只有 80 MHz、5G 有 665 MHz，按真实比例画 2.4G 会
+  变成一根看不见的线，所以每段宽度取 √跨度 归一（实测 2.4G ≈ 26%、5G ≈ 74%）。
+- 游标用 `requestAnimationFrame` 插值（不是每帧硬跳）；回卷时用更慢的插值，
+  能看见游标一路往左扫回去。已扫过的窗留浅蓝底、当前窗高亮。
+- **假固件不模拟驻留时间**（一个窗口 3ms 就跑完），不加节流界面上的游标会闪成
+  一片；`Runner._mock_pace()` 在每帧之间补 `dwell_ms/2`，节奏就与真机一致。
+  实测：假固件 ≈ 8~10 窗/秒，真机 ≈ 4 窗/秒（串口解析 1024 点才是瓶颈，
+  不是 100ms 驻留），一轮 49 窗约 12s。
 
 ## 数据契约（Python → 前端）
 
@@ -77,7 +96,7 @@ Windows 上也可以双击 `host/start.bat`（缺依赖会自动 `pip install`�
 
 | 信号 | 频率 | 内容 |
 |---|---|---|
-| `info` | 开流时一次 | `{kind:"info", identity, port, baudrate, mock, scenario, gain_index, profiles, plugins, notes}` |
+| `info` | 开流时一次 | `{kind:"info", identity, port, baudrate, mock, scenario, gain_index, lang, profiles, plugins, plans:{id:[[center_hz,bw_hz]...]}, notes}` |
 | `spectrum` | ≤20fps | `{kind:"spectrum", ts, module, center_hz, bw_hz, freq_lo_hz, freq_hi_hz, raw_bins, bins:[0..255]}` |
 | `tables` | 1s | `{kind:"tables", plugins:[{id, name, weight, table:{title, columns, rows}, payload, error}]}` |
 | `stats` | 1s | `{kind:"stats", slices, snapshots, elapsed_s, source_errors, last_source_error}` |
@@ -103,4 +122,6 @@ JS → Python 只有四个入口：`listPorts()`、`scenarios()`、`renderText()
 | 前端 `Bridge.ready()` 一直 false，`window.backend` 不存在 | `QWebChannel` 只交给了 `setWebChannel()`，Python 侧没留引用被 GC | `HostWindow.channel` 持强引用（`QWebChannel(self)`） |
 | 页面白屏、网络面板无报错 | QWebEngine 的 `fetch()` 不支持 `file://` | 一律用 `XMLHttpRequest` 加载本地片段（`LocalContentCanAccessFileUrls=True`） |
 | 画布全黑但帧数 > 0 | 页面切走后 `requestAnimationFrame` 停、画布尺寸 0 | `fitCanvas()` 只在 `onEnter` 里取容器尺寸；3D 组件在 `onLeave` 里 `dispose()` |
+| 游标一秒刷完 90 多轮、覆盖数一直是 1 | 假固件不吃 `dwell_ms`，一个窗口 3ms 就跑完 | `Runner._mock_pace()` 补节奏（见上节） |
+| 扫频进度条上没有游标 / 显示「等待扫描计划」 | `info` 是开流后才到，页面 `onEnter` 时还没有 `plans` | `app.js` 把 `info` 也 `Router.dispatch("Info", …)`，页面 `onInfo` 里补 `applyPlan()` |
 | 网页报错查不到 | 默认不打印前端 console | `ConsolePage.javaScriptConsoleMessage` 转发到 stdout（`[js:err] 文件:行 消息`） |

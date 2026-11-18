@@ -1,7 +1,10 @@
 /*
  * app.js —— 外壳装配：导航 + 桥 + 顶栏控制 + 事件路由 + 自检探针。
  *
- * 依赖方向：app.js → router/bridge/util/three3d → pages/*（单向，页面不反调外壳）。
+ * 依赖方向：app.js → i18n/router/bridge/util/three3d → pages/*（单向，页面不反调外壳）。
+ *
+ * 语言：静态文案靠 index.html / page.html 里的 data-i18n 自动翻；这里负责
+ * 顶栏控件、状态栏、底部 kv 与日志——它们都是运行时拼出来的，必须调 T()。
  */
 (function () {
   const state = {
@@ -11,6 +14,9 @@
     stats: null,
     running: false,
     lastSpectrumAt: 0,
+    status: { name: "idle", key: "status.idle", raw: null },
+    port: "COM56",
+    kvPairs: [],
   };
 
   const MAX_LOG = 220;
@@ -18,6 +24,9 @@
   document.addEventListener("DOMContentLoaded", init);
 
   async function init() {
+    I18N.apply(document);      // 静态文案先按当前语言填一遍
+    bindLangToggle();
+
     // ---- 桥事件 → 页面分发 ----
     Bridge.on("spectrum", (payload) => {
       state.framesSeen += 1;
@@ -39,26 +48,74 @@
 
     // ---- 桥就绪后拉一次本机串口/场景清单 ----
     Bridge.init(async () => {
+      await applyHostDefaults();
       await loadPorts();
       await loadScenarios();
       bindControls();
-      log({ text: "桥已就绪（window.backend 可用）" });
+      await syncRuntime();
+      log({ text: T("log.ready") });
     });
 
     if (!Bridge.ready()) {
       setTimeout(() => {
-        if (!Bridge.ready()) log({ level: "err", text: "QWebChannel 未连上：页面是不是被别的浏览器打开了？" });
+        if (!Bridge.ready()) log({ level: "err", text: T("log.noChannel") });
       }, 1500);
     }
   }
+
+  // ---- 语言 -------------------------------------------------------------
+  function bindLangToggle() {
+    const btn = document.querySelector("[data-lang-toggle]");
+    if (!btn) return;
+    btn.addEventListener("click", () => I18N.setLang(I18N.lang() === "zh" ? "en" : "zh"));
+  }
+
+  /**
+   * 命令行（--lang / --port / --gain-index）来的默认值。
+   * 语言只在本机没存过偏好时才采用，免得覆盖用户在界面里的选择。
+   */
+  async function applyHostDefaults() {
+    let defaults = null;
+    try { defaults = await Bridge.call("uiDefaults"); } catch (err) { /* 老版本没这个槽，忽略 */ }
+    if (!defaults) return;
+    let stored = null;
+    try { stored = localStorage.getItem("espsdr.lang"); } catch (err) { /* 忽略 */ }
+    if (!stored && defaults.lang && defaults.lang !== I18N.lang()) I18N.setLang(defaults.lang);
+    if (defaults.port) state.port = defaults.port;
+    if (defaults.gain_index !== null && defaults.gain_index !== undefined) {
+      document.getElementById("gain").value = defaults.gain_index;
+    }
+  }
+
+  /**
+   * 补一次运行态。原生信号在 QWebChannel 连上之前会丢，
+   * 而 --mock / --autostart 在页面加载前就开始采了 → 不补就永远显示「未连接」。
+   */
+  async function syncRuntime() {
+    let rt = null;
+    try { rt = await Bridge.call("runtime"); } catch (err) { return; }
+    if (!rt) return;
+    if (rt.info) onInfo(rt.info, true);
+    if (rt.stats) onStats(rt.stats);
+    if (rt.running) {
+      setStatus("running", "status.running");
+      setRunning(true);
+    }
+  }
+
+  /** 语言变了：底部 kv 与状态栏要重算（各页自己由 Router.relabel 通知） */
+  window.addEventListener("langchange", () => {
+    rerenderKv();
+    const st = state.status;
+    setStatus(st.name, st.key, st.raw);
+  });
 
   // ---- 顶栏 -------------------------------------------------------------
   async function loadPorts() {
     const select = document.getElementById("port");
     let ports = [];
-    try { ports = await Bridge.call("listPorts"); } catch (err) { log({ level: "err", text: "读串口失败：" + err }); }
+    try { ports = await Bridge.call("listPorts"); } catch (err) { log({ level: "err", text: T("log.portsFailed", { error: err }) }); }
     select.innerHTML = "";
-    const preset = ["COM56", "COM59"].filter((p) => !ports.some((x) => x.device === p));
     ports.forEach((info) => {
       const opt = document.createElement("option");
       opt.value = info.device;
@@ -68,12 +125,13 @@
     if (!ports.length) {
       const opt = document.createElement("option");
       opt.value = "";
-      opt.textContent = "（没找到串口）";
+      opt.textContent = "—";
       select.appendChild(opt);
+      log({ level: "err", text: T("log.noPorts") });
+      return;
     }
-    const prefer = ports.find((p) => p.device === "COM56") || ports[0];
+    const prefer = ports.find((p) => p.device === state.port) || ports.find((p) => p.device === "COM56") || ports[0];
     if (prefer) select.value = prefer.device;
-    if (preset.length && !ports.length) log({ level: "err", text: "没读到任何串口，插好板子再点开始" });
   }
 
   async function loadScenarios() {
@@ -109,34 +167,36 @@
       mock: mock,
       scenario: document.getElementById("scenario").value,
       bins_out: 256,
+      lang: I18N.lang(),
     };
-    setStatus("starting", "连接中…");
+    setStatus("starting", "status.starting");
     setRunning(true);
     try {
       const result = await Bridge.call("start", JSON.stringify(config));
       if (!result || !result.ok) {
-        setStatus("error", (result && result.message) || "启动失败");
+        setStatus("error", null, (result && result.message) || T("status.error"));
         setRunning(false);
-        log({ level: "err", text: "启动失败：" + (result && result.message) });
+        log({ level: "err", text: T("log.startFailed", { error: (result && result.message) || "" }) });
       } else {
-        setStatus("running", "采集中");
+        setStatus("running", "status.running");
         log({ text: result.message });
+        log({ text: mock ? T("foot.nextMock") : T("foot.next") });
       }
     } catch (err) {
-      setStatus("error", "桥调用失败");
+      setStatus("error", null, T("status.error"));
       setRunning(false);
-      log({ level: "err", text: "桥调用失败：" + err });
+      log({ level: "err", text: T("log.bridgeFailed", { error: err }) });
     }
   }
 
   async function stopRun() {
     try {
       const result = await Bridge.call("stop");
-      log({ text: (result && result.message) || "已停止" });
+      log({ text: (result && result.message) || T("log.stopped") });
     } catch (err) {
-      log({ level: "err", text: "停止失败：" + err });
+      log({ level: "err", text: T("log.stopFailed", { error: err }) });
     }
-    setStatus("idle", "已停止");
+    setStatus("idle", "status.idle");
     setRunning(false);
   }
 
@@ -146,80 +206,90 @@
     document.getElementById("btn-stop").disabled = !running;
   }
 
-  function setStatus(stateName, text) {
+  /** key = i18n 文案键（跟着语言变）；rawText = 动态原文（错误消息之类，不翻译） */
+  function setStatus(stateName, key, rawText) {
+    state.status = { name: stateName, key: key || null, raw: rawText || null };
     const el = document.getElementById("status");
     el.dataset.state = stateName;
-    el.textContent = text;
+    el.textContent = key ? T(key) : rawText || stateName;
   }
 
   // ---- 事件 -------------------------------------------------------------
-  function onInfo(info) {
-    state.info = info;
+  function gainText(info) {
+    return info.gain_index === null || info.gain_index === undefined
+      ? T("kv.gainAgc")
+      : T("kv.gainFixed", { n: info.gain_index });
+  }
+
+  function renderKv(pairs) {
+    state.kvPairs = pairs;
     const kv = document.getElementById("kv");
     kv.innerHTML = "";
-    const pairs = [
-      ["固件", info.identity || "—"],
-      ["传输", info.transport || "—"],
-      ["串口", (info.port || "—") + " @ " + (info.baudrate || 0)],
-      ["模式", info.mock ? "假固件/" + info.scenario : "真机"],
-      ["增益", info.gain_index === null || info.gain_index === undefined ? "硬件 AGC" : "固定档 " + info.gain_index],
-      ["模块", (info.plugins || []).map((p) => p.id + "(" + p.requests + "窗)").join(" ") || "—"],
-    ];
     pairs.forEach(([k, v]) => {
       const span = document.createElement("span");
-      span.innerHTML = k + " <b>" + escapeHtml(String(v)) + "</b>";
+      span.innerHTML = escapeHtml(String(k)) + " <b>" + escapeHtml(String(v)) + "</b>";
       kv.appendChild(span);
     });
-    (info.notes || []).forEach((n) => log({ text: n }));
+    // 最后错误单独挂在尾部（语言切换时也要复原）
+    if (state.stats && state.stats.last_source_error) {
+      const span = document.createElement("span");
+      span.className = "err";
+      span.textContent = T("kv.lastError") + ": " + state.stats.last_source_error;
+      kv.appendChild(span);
+    }
+  }
+
+  function rerenderKv() {
+    if (state.stats && state.info) onStats(state.stats);
+    else if (state.info) onInfo(state.info, true);
+  }
+
+  function onInfo(info, quiet) {
+    state.info = info;
+    renderKv([
+      [T("kv.firmware"), info.identity || "—"],
+      [T("kv.transport"), info.transport || "—"],
+      [T("kv.port"), (info.port || "—") + " @ " + (info.baudrate || 0)],
+      [T("kv.mode"), info.mock ? T("kv.mockMode", { scenario: info.scenario }) : T("kv.realMode")],
+      [T("kv.gain"), gainText(info)],
+      [T("kv.modules"), (info.plugins || []).map((p) => p.id + "(" + p.requests + ")").join(" ") || "—"],
+    ]);
+    Router.dispatch("Info", info);
+    if (!quiet) (info.notes || []).forEach((n) => log({ text: n }));
   }
 
   function onStats(stats) {
     state.stats = stats;
-    const kv = document.getElementById("kv");
     const info = state.info;
     if (!info) return;
-    kv.innerHTML = "";
-    const pairs = [
-      ["固件", info.identity || "—"],
-      ["串口", (info.port || "—") + (info.mock ? " · 假固件/" + info.scenario : "")],
-      ["增益", info.gain_index === null || info.gain_index === undefined ? "硬件 AGC" : "固定档 " + info.gain_index],
-      ["时间片", stats.slices],
-      ["快照", stats.snapshots],
-      ["已推帧", state.framesSeen],
-      ["射频秒", (stats.elapsed_s || 0).toFixed(1)],
-      ["错误", stats.source_errors],
-    ];
-    pairs.forEach(([k, v]) => {
-      const span = document.createElement("span");
-      span.innerHTML = k + " <b>" + escapeHtml(String(v)) + "</b>";
-      kv.appendChild(span);
-    });
-    if (stats.last_source_error) {
-      const span = document.createElement("span");
-      span.className = "err";
-      span.textContent = "最后错误：" + stats.last_source_error;
-      kv.appendChild(span);
-    }
-    if (!state.running) {
-      setStatus("idle", "已停止");
-    }
+    renderKv([
+      [T("kv.firmware"), info.identity || "—"],
+      [T("kv.port"), (info.port || "—") + (info.mock ? " · " + T("kv.mockMode", { scenario: info.scenario }) : "")],
+      [T("kv.gain"), gainText(info)],
+      [T("kv.slices"), stats.slices],
+      [T("kv.snapshots"), stats.snapshots],
+      [T("kv.frames"), state.framesSeen],
+      [T("kv.rfSeconds"), (stats.elapsed_s || 0).toFixed(1)],
+      [T("kv.errors"), stats.source_errors],
+    ]);
+    if (!state.running) setStatus("idle", "status.idle");
   }
 
   function onState(msg) {
     if (!msg) return;
     if (msg.state === "running") {
-      setStatus("running", "采集中");
+      setStatus("running", "status.running");
       setRunning(true);
     } else if (msg.state === "stopped") {
-      setStatus("idle", "已停止");
+      setStatus("idle", "status.idle");
       setRunning(false);
     } else if (msg.state === "error") {
-      setStatus("error", msg.message || "错误");
+      setStatus("error", null, msg.message || T("status.error"));
       setRunning(false);
     } else if (msg.state === "ui-loaded") {
-      log({ text: "前端页面加载完成" });
+      log({ text: "ui-loaded" });
     } else if (msg.state === "ui-load-failed") {
-      setStatus("error", "页面加载失败");
+      setStatus("error", null, "ui-load-failed");
     }
   }
 
@@ -285,11 +355,14 @@
     return {
       ready: Bridge.ready(),
       page: page ? page.id : null,
+      lang: I18N.lang(),
       three: typeof THREE !== "undefined" ? THREE.REVISION || "?" : null,
       webgl: webglInfo(),
       framesSeen: state.framesSeen,
       tablesSeen: state.tablesSeen,
       running: state.running,
+      statusText: (document.getElementById("status") || {}).textContent || "",
+      navLabels: Array.from(document.querySelectorAll("#nav .nav-item")).map((b) => b.textContent),
       canvases: canvases,
       pageProbe: page && page.mod && page.mod.probe ? page.mod.probe() : null,
     };

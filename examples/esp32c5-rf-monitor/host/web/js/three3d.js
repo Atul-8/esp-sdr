@@ -56,6 +56,8 @@ window.Three3D = (function () {
       this.amp = opts.amp || 0.85;
       this.frames = 0;
       this.dirty = true;
+      // 归一化到 0..1 的坡度（用自适应范围，噪声底才不会糊成一张平面）
+      this.range = new U.AutoRange(14, 0.25);
       this.heights = new Float32Array(this.nFreq * this.nTime);
 
       if (!hasThree) {
@@ -122,7 +124,10 @@ window.Three3D = (function () {
     /** 推进一帧：bins 是当前窗口的功率码，会重采样到 nFreq 后压到最新一行 */
     push(bins) {
       if (!this.ok) return;
-      const row = resample(bins, this.nFreq);
+      this.range.update(bins);
+      const raw = resample(bins, this.nFreq);
+      const row = new Float32Array(this.nFreq);
+      for (let i = 0; i < this.nFreq; i++) row[i] = this.range.norm(raw[i]);
       // 环形缓冲：整体前移一行（越靠前越新），写入最后一行
       this.heights.copyWithin(0, this.nFreq);
       this.heights.set(row, (this.nTime - 1) * this.nFreq);
@@ -140,9 +145,9 @@ window.Three3D = (function () {
         // PlaneGeometry 顶点顺序：iy 行（纵深/时间）× ix 列（横向/频率）
         const iy = Math.floor(v / perRow);
         const ix = v % perRow;
-        const code = this.heights[iy * perRow + ix] || 0;
-        pos.setY(v, (code / 255) * this.amp);
-        const hex = U.heatHex(code);
+        const t = this.heights[iy * perRow + ix] || 0;
+        pos.setY(v, t * this.amp);
+        const hex = U.heatHexT(t);
         col.setXYZ(v, ((hex >> 16) & 255) / 255, ((hex >> 8) & 255) / 255, (hex & 255) / 255);
       }
       pos.needsUpdate = true;

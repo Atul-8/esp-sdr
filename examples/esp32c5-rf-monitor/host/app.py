@@ -26,7 +26,6 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from PySide6.QtCore import QObject, QThread, QTimer, Qt, QUrl, Signal, Slot
 from PySide6.QtWebChannel import QWebChannel
@@ -35,7 +34,11 @@ from PySide6.QtWebEngineCore import QWebEnginePage
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import QApplication
 
-from session import WEB_DIR, HostConfig, HostSession, list_ports, to_json
+import paths  # noqa: E402 - 本地模块，负责定位分析层
+from session import LANGS, WEB_DIR, HostConfig, HostSession, list_ports, to_json, tr  # noqa: E402
+
+#: 分析层目录（core/ modes/ 所在）。找不到会在这里就抛明确的错误。
+SRC_DIR = paths.ensure_on_path()
 
 class ConsolePage(QWebEnginePage):
     """把前端 console 输出打到 Python 的 stdout：网页出错时不用开 DevTools 也能查。"""
@@ -54,6 +57,7 @@ TABLE_INTERVAL = 1.0
 STEP_SECONDS = 0.35
 #: 连续失败多少个时间片就自动停机（core 目前没有退避，应用层兜底）
 MAX_CONSECUTIVE_ERRORS = 5
+MOCK_FRAMES_PER_WINDOW = 2  # 假固件每个窗口吐 2 帧（tests/fake_firmware.py 的约定）
 
 
 class Bridge(QObject):
@@ -77,6 +81,20 @@ class Bridge(QObject):
         return to_json(list_ports())
 
     @Slot(result=str)
+    def uiDefaults(self) -> str:  # noqa: N802 - JS 侧用驼峰
+        """界面初始值（语言/串口/增益）：让 ``--lang en`` 这类命令行参数也作用到网页。"""
+        return to_json(self._window.ui_defaults())
+
+    @Slot(result=str)
+    def runtime(self) -> str:
+        """当前运行态快照：给**晚连上**的前端补一次状态。
+
+        QWebChannel 连上之前的信号会丢；``--mock`` / ``--autostart`` 早在页面
+        加载完之前就把采集跑起来了，前端不补这一下会一直显示「未连接」。
+        """
+        return to_json(self._window.runtime())
+
+    @Slot(result=str)
     def scenarios(self) -> str:
         from tests.mock_source import SCENARIOS
 
@@ -85,7 +103,9 @@ class Bridge(QObject):
     @Slot(result=str)
     def renderText(self) -> str:  # noqa: N802
         session = self._window.session
-        return session.render_text() if session else "（未连接）"
+        if session is None:
+            return tr(self._window.lang, "not_connected")
+        return session.render_text()
 
     # ---- 控制 -------------------------------------------------------------
     @Slot(str, result=str)
@@ -107,15 +127,34 @@ class Bridge(QObject):
 class Runner(QThread):
     """射频线程：反复跑时间片，把快照/表格节流后推给前端。"""
 
-    def __init__(self, session: HostSession, bridge: Bridge) -> None:
+    def __init__(self, session: HostSession, bridge: Bridge, lang: str = "zh") -> None:
         super().__init__()
         self.session = session
         self.bridge = bridge
+        self.lang = lang
         self._stop = False
         self.last_error = ""
 
     def request_stop(self) -> None:
         self._stop = True
+
+    def _mock_pace(self) -> float:
+        """假固件不模拟驻留时间（一个窗口 3ms 就跑完），整条扫描计划会瞬间刷完、
+        游标闪成一片。这里按「真机每窗 100ms / 每窗 2 帧」给帧之间补一个步长，
+        界面节奏就和真机一致（约 10 窗/秒）。真机返回 0（节奏由串口自然决定）。"""
+        config = self.session.config
+        if not config or not config.mock:
+            return 0.0
+        dwell_ms = 100
+        for plugin in self.session.registry.plugins:
+            try:
+                requests = list(plugin.scan_requests()) if hasattr(plugin, "scan_requests") else []
+            except Exception:  # noqa: BLE001 - 折算用的常量，拿不到就用默认值
+                requests = []
+            if requests:
+                dwell_ms = max(10, int(requests[0].dwell_ms))
+                break
+        return (dwell_ms / 1000.0) / MOCK_FRAMES_PER_WINDOW
 
     def run(self) -> None:  # noqa: C901 - 单线程主循环，读下来比拆散更清楚
         session, bridge = self.session, self.bridge
@@ -123,6 +162,8 @@ class Runner(QThread):
         last_slow = 0.0
         consecutive_errors = 0
         seen_errors = 0
+
+        pace = self._mock_pace()
 
         def on_snapshot(snap) -> None:
             nonlocal last_spectrum
@@ -133,7 +174,9 @@ class Runner(QThread):
             try:
                 bridge.spectrum.emit(to_json(session.spectrum(snap)))
             except Exception as exc:  # noqa: BLE001 - 一帧打包失败不该停掉整个会话
-                bridge.log.emit(f"打包频谱失败：{type(exc).__name__}: {exc}")
+                bridge.log.emit(tr(self.lang, "pack_failed", error=f"{type(exc).__name__}: {exc}"))
+            if pace:
+                time.sleep(pace)
 
         try:
             while not self._stop:
@@ -147,20 +190,19 @@ class Runner(QThread):
                     if stats.source_errors > seen_errors:
                         seen_errors = stats.source_errors
                         consecutive_errors += 1
-                        message = stats.last_source_error or "扫描失败"
+                        message = stats.last_source_error or "scan failed"
                         if message != self.last_error:
                             self.last_error = message
-                            bridge.log.emit(f"[射频错误] {message}")
+                            bridge.log.emit(tr(self.lang, "rf_error", message=message))
                         if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
                             bridge.log.emit(
-                                f"连续 {consecutive_errors} 个时间片失败，已自动停机。"
-                                f"最后一次：{message}"
+                                tr(self.lang, "auto_stop", n=consecutive_errors, message=message)
                             )
                             break
                     else:
                         consecutive_errors = 0
         except Exception as exc:  # noqa: BLE001
-            bridge.log.emit(f"[线程异常] {type(exc).__name__}: {exc}")
+            bridge.log.emit(tr(self.lang, "thread_error", error=f"{type(exc).__name__}: {exc}"))
         finally:
             try:
                 session.close()
@@ -173,6 +215,10 @@ class HostWindow(QObject):
 
     def __init__(self, view: QWebEngineView) -> None:
         super().__init__()
+        #: 当前界面语言（由最近一次 start_run / 命令行决定）
+        self.lang = "zh"
+        self.default_port = "COM56"
+        self.default_gain: int | None = None
         self.view = view
         self.bridge = Bridge(self)
         self.session: HostSession | None = None
@@ -182,6 +228,18 @@ class HostWindow(QObject):
         #: **必须持有 QWebChannel 的 Python 引用**：只交给 setWebChannel 时对象可能被 GC，
         #: 表现是前端 new QWebChannel 回调永不触发（Bridge 一直 ready=false）。
         self.channel: QWebChannel | None = None
+
+    def runtime(self) -> dict[str, object]:
+        session = self.session
+        runner = self.runner
+        return {
+            "running": bool(runner is not None and runner.isRunning()),
+            "info": session.describe() if session is not None else None,
+            "stats": session.stats() if session is not None else None,
+        }
+
+    def ui_defaults(self) -> dict[str, object]:
+        return {"lang": self.lang, "port": self.default_port, "gain_index": self.default_gain}
 
     # ---- 页面 -------------------------------------------------------------
     def load(self) -> None:
@@ -200,30 +258,32 @@ class HostWindow(QObject):
     # ---- 会话 -------------------------------------------------------------
     def start_run(self, config_json: str) -> dict[str, object]:
         if self.runner is not None and self.runner.isRunning():
-            return {"ok": False, "message": "已经在跑了，先停一下"}
+            return {"ok": False, "message": tr(self.lang, "already_running")}
         try:
             config = HostConfig.from_json(config_json)
+            self.lang = config.lang
             session = HostSession(bins_out=config.bins_out)
             info = session.open(config)
         except Exception as exc:  # noqa: BLE001 - 打不开端口是最常见的用户错误
             message = f"{type(exc).__name__}: {exc}"
-            self.bridge.log.emit(f"[打开失败] {message}")
+            self.bridge.log.emit(tr(self.lang, "already_running_log", message=message))
             self.bridge.state.emit(to_json({"state": "error", "message": message}))
             return {"ok": False, "message": message}
         self.session = session
         self.bridge.info.emit(to_json(info))
         self.bridge.state.emit(to_json({"state": "running", "ts": round(time.time(), 3)}))
-        self.runner = Runner(session, self.bridge)
+        self.runner = Runner(session, self.bridge, config.lang)
         self.runner.start()
-        return {"ok": True, "message": f"已开始：{info.get('identity') or config.port}", "info": info}
+        message = tr(config.lang, "started", what=info.get("identity") or config.port)
+        return {"ok": True, "message": message, "info": info}
 
     def stop_run(self) -> dict[str, object]:
         if self.runner is None or not self.runner.isRunning():
-            return {"ok": False, "message": "当前没有在跑"}
+            return {"ok": False, "message": tr(self.lang, "no_run")}
         self.runner.request_stop()
         self.runner.wait(4000)
         self.bridge.tables.emit(to_json(self.session.tables()) if self.session else "{}")
-        return {"ok": True, "message": "已停止"}
+        return {"ok": True, "message": tr(self.lang, "stopped")}
 
     def shutdown(self) -> None:
         if self.runner is not None and self.runner.isRunning():
@@ -243,6 +303,7 @@ def build_app(argv: list[str]) -> tuple[QApplication, QWebEngineView, HostWindow
     parser.add_argument("--seconds", type=float, default=6.0, help="--selftest 跑多久")
     parser.add_argument("--shot", default="", help="--selftest 截图保存路径")
     parser.add_argument("--window-size", default="1440x900", help="窗口尺寸 WxH")
+    parser.add_argument("--lang", default="zh", choices=list(LANGS), help="界面默认语言（网页里还能切，切换后记在 localStorage）")
     args = parser.parse_args(argv)
 
     app = QApplication(sys.argv[:1])
@@ -262,6 +323,9 @@ def build_app(argv: list[str]) -> tuple[QApplication, QWebEngineView, HostWindow
     view.show()
 
     window = HostWindow(view)
+    window.lang = args.lang
+    window.default_port = args.port
+    window.default_gain = args.gain_index
     window.load()
     return app, view, window, args
 
@@ -318,11 +382,47 @@ def run_selftest(app: QApplication, view: QWebEngineView, window: HostWindow, ar
         canvases = spectrum.get("canvases", []) if isinstance(spectrum, dict) else []
         drawn = [c for c in canvases if float(c.get("nonBlack", 0)) > 0.01]
         frames = int(spectrum.get("framesSeen", 0) or 0)
+        wf = next((c for c in canvases if c.get("id") == "wf-canvas"), {})
+        i18n = report.get("i18n") or {}
+        nav = i18n.get("navLabels") or []
+        wf_probe = i18n.get("wf2d") or {}
+        bar = ((spectrum.get("pageProbe") or {}).get("scanbar") or {}) if isinstance(spectrum, dict) else {}
+        bar_groups = bar.get("groups") or []
+        bar_wrap = spectrum.get("scanbarSelfTest") or {} if isinstance(spectrum, dict) else {}
         report["canvases_drawn"] = len(drawn)
         report["frames_seen"] = frames
         checks = {
             "spectrum_frames": frames > 0,
             "canvas_drawn": len(drawn) > 0,
+            # 2D 瀑布（坏过的那块）：画布要有内容 + 缓冲里「一帧一行」真的在累积，
+            # 且最新几行比未填充的老行亮（= 旧行确实在下移，不是原地覆盖/拉伸）
+            "waterfall_2d": (
+                float(wf.get("nonBlack", 0)) > 0.05
+                and int(wf_probe.get("frames", 0) or 0) > 10
+                and int(wf_probe.get("distinctRows", 0) or 0) >= int(wf_probe.get("frames", 0) or 0) * 0.9
+                and int(wf_probe.get("topMean", 0) or 0) > int(wf_probe.get("bottomMean", 0) or 0) + 100
+                and not wf_probe.get("imagesTooMany")
+            ),
+            # 扫频进度条：至少切出两个频段（2.4G / 5G），游标在轨道内、已走过多个窗
+            "scanbar_bands": len(bar_groups) >= 2 and int(bar.get("windows", 0) or 0) > 10,
+            "scanbar_progress": (
+                int(bar.get("visited", 0) or 0) >= 3
+                and int(bar.get("index", -1)) >= 0
+                and 0 <= int(bar.get("x", -1)) <= int(bar.get("width", 0) or 0)
+            ),
+            # 到终点回卷：喂到最后一格再喂第一格，轮次 +1、本轮覆盖清零
+            "scanbar_wrap": int(bar_wrap.get("passesAfterWrap", 0) or 0) == 2
+            and int(bar_wrap.get("visitedAfterWrap", 0) or 0) == 1
+            and int(bar_wrap.get("indexAtEnd", -1)) == 3,
+            # 语言切换：中文 → English，导航与状态栏都要跟着变
+            "i18n_switch": i18n.get("lang") == "en" and any("Live spectrum" in str(x) for x in nav),
+            # 外壳文案（含扫频进度条）真的翻了英文，level 数据值仍走显示层映射
+            "i18n_shell": (
+                len(i18n.get("shell") or []) == 4
+                and "Scan progress" in str((i18n.get("shell") or [""])[0])
+                and "window 6/49" in str((i18n.get("shell") or ["", ""])[1])
+                and str((i18n.get("shell") or ["", "", "", ""])[3]) == "Heavy"
+            ),
             "wifi_rows": int(wifi.get("rows", 0) or 0) > 5,
             "wifi_recommend": bool(str(wifi.get("rec24", "")).startswith("ch")),
             "wifi_notes": int(wifi.get("notes", 0) or 0) >= 3,
@@ -343,7 +443,10 @@ def run_selftest(app: QApplication, view: QWebEngineView, window: HostWindow, ar
         def probe() -> None:
             code = PAGE_JS.get(page_id)
             if page_id == "spectrum":
-                code = "JSON.stringify(window.probeReport ? window.probeReport() : {missing:true})"
+                code = (
+                    "JSON.stringify(Object.assign(window.probeReport ? window.probeReport() : {missing:true},"
+                    " {scanbarSelfTest: (window.ScanBar ? ScanBar.selftest() : null)}))"
+                )
             view.page().runJavaScript(code, 0, lambda result: collect(page_id, result))
 
         def collect(page_id: str, result: object) -> None:
@@ -355,12 +458,41 @@ def run_selftest(app: QApplication, view: QWebEngineView, window: HostWindow, ar
                 payload["shot"] = shot(page_id)
             report["pages"][page_id] = payload
             nxt = ORDER[ORDER.index(page_id) + 1 :]
-            if nxt:
+            if page_id == "spectrum":
+                # 频谱页验完顺手验一次中英切换，然后保持英文继续验后面的页
+                QTimer.singleShot(300, lambda: switch_lang(nxt[0]))
+            elif nxt:
                 QTimer.singleShot(400, lambda: stage(nxt[0]))
             else:
                 finish()
 
         QTimer.singleShot(1800, probe)
+
+    def switch_lang(next_id: str) -> None:
+        view.page().runJavaScript("I18N.setLang('en')")
+
+        def probe_lang() -> None:
+            view.page().runJavaScript(
+                "JSON.stringify(Object.assign(window.probeReport ? window.probeReport() : {},"
+                ' {shell: [T("scanbar.title"), T("scanbar.now", {center: 5180, at: 6, total: 49, pass: 2}),'
+                ' T("spectrum.title"), T("level.重度")]}))',
+                0,
+                collect_lang,
+            )
+
+        def collect_lang(result: object) -> None:
+            try:
+                payload = json.loads(str(result)) if result else {}
+            except Exception:  # noqa: BLE001
+                payload = {}
+            i18n = {k: payload.get(k) for k in ("lang", "statusText", "navLabels", "shell")}
+            i18n["wf2d"] = (payload.get("pageProbe") or {}).get("wf2d")
+            i18n["shot"] = shot("en-spectrum")
+            report["i18n"] = i18n
+            steps.append(f"语言切换：{i18n.get('lang')} / {i18n.get('navLabels')}")
+            QTimer.singleShot(300, lambda: stage(next_id))
+
+        QTimer.singleShot(700, probe_lang)
 
     ORDER = ["spectrum", "wifi", "raw"]
 
@@ -380,6 +512,7 @@ def run_selftest(app: QApplication, view: QWebEngineView, window: HostWindow, ar
                     "scenario": args.scenario,
                     "gain_index": args.gain_index,
                     "bins_out": 256,
+                    "lang": args.lang,
                 }
             )
         )
@@ -419,6 +552,7 @@ def main(argv: list[str] | None = None) -> int:
                         "scenario": args.scenario,
                         "gain_index": args.gain_index,
                         "bins_out": 256,
+                        "lang": args.lang,
                     }
                 )
             )

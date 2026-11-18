@@ -18,30 +18,84 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
-from core.registry import Output, Registry, discover
-from core.scheduler import Scheduler, SchedulerStats
-from core.serial_link import EspSdrLink
-from core.snapshot import Snapshot
-from tests.fake_firmware import FakeFirmware
-from tests.mock_modes import ProbePlugin
-from tests.mock_source import SCENARIOS
+import paths  # 本地模块：定位分析层（core/ modes/ output/ tests/）
+
+#: 分析层目录（<proj>/repo/examples/esp32c5-rf-monitor 或 $ESPSDR_SRC）
+SRC_DIR = str(paths.ensure_on_path())
+
+from core.registry import Output, Registry, discover  # noqa: E402 - 必须先 ensure_on_path
+from core.scheduler import Scheduler, SchedulerStats  # noqa: E402
+from core.serial_link import EspSdrLink  # noqa: E402
+from core.snapshot import Snapshot  # noqa: E402
+from tests.fake_firmware import FakeFirmware  # noqa: E402
+from tests.mock_modes import ProbePlugin  # noqa: E402
+from tests.mock_source import SCENARIOS  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-APP_DIR = os.path.dirname(HERE)
-DEFAULT_DIR = os.path.join(APP_DIR, ".data")
+DEFAULT_DIR = os.path.join(SRC_DIR, ".data")
 WEB_DIR = os.path.join(HERE, "web")
+
+# ---------------------------------------------------------------------------
+# 界面文案（中/英）。前端自己有一份完整的 UI 词典；这里只翻 Python 侧会发给
+# 界面的那几条（链路说明、启停消息、错误），模块自带的表格/ASCII 沿用模块语言。
+# ---------------------------------------------------------------------------
+MESSAGES: dict[str, dict[str, str]] = {
+    "zh": {
+        "probe_only": "modes/ 还没有功能模块 → 只用「链路探针」验证真机链路",
+        "read_link_failed": "读链路信息失败：{error}",
+        "already_running": "已经在跑了，先停一下",
+        "no_run": "当前没有在跑",
+        "started": "已开始：{what}",
+        "stopped": "已停止",
+        "not_connected": "（未连接）",
+        "no_output": "（没有模块产出）",
+        "rf_error": "[射频错误] {message}",
+        "auto_stop": "连续 {n} 个时间片失败，已自动停机。最后一次：{message}",
+        "pack_failed": "打包频谱失败：{error}",
+        "thread_error": "[线程异常] {error}",
+        "already_running_log": "[打开失败] {message}",
+    },
+    "en": {
+        "probe_only": "No functional module in modes/ yet — using the link probe to verify the board",
+        "read_link_failed": "Failed to read link info: {error}",
+        "already_running": "Already running — stop it first",
+        "no_run": "Nothing is running",
+        "started": "Started: {what}",
+        "stopped": "Stopped",
+        "not_connected": "(not connected)",
+        "no_output": "(no module output)",
+        "rf_error": "[RF error] {message}",
+        "auto_stop": "{n} consecutive slices failed — stopped automatically. Last: {message}",
+        "pack_failed": "Failed to pack spectrum: {error}",
+        "thread_error": "[Thread error] {error}",
+        "already_running_log": "[Open failed] {message}",
+    },
+}
+
+#: 支持的语言（前端下拉/按钮也只给这两个）
+LANGS = ("zh", "en")
+
+
+def tr(lang: str | None, key: str, **kwargs: Any) -> str:
+    """取一条 UI 文案；缺语言/缺 key 时退回中文（绝不抛，界面不能因为文案挂掉）。"""
+    table = MESSAGES.get((lang or "zh").lower()) or MESSAGES["zh"]
+    template = table.get(key) or MESSAGES["zh"].get(key) or key
+    try:
+        return template.format(**kwargs)
+    except (KeyError, IndexError):
+        return template
 
 #: 默认下行点数：前端画图够用，又不至于把 QWebChannel 灌满（1024 → 256 取桶内最大值）
 DEFAULT_BINS_OUT = 256
 
 
-def build_registry() -> tuple[Registry, list[str]]:
+def build_registry(lang: str = "zh") -> tuple[Registry, list[str]]:
     """扫描 ``modes/`` 包，拿到所有功能模块；一个都没有时退化成一个链路探针。"""
     registry = discover("modes")
     notes = list(registry.errors)
     if len(registry) == 0:
-        registry.register(ProbePlugin(name="链路探针", slice_weight=1.0))
-        notes.append("modes/ 还没有功能模块 → 只用「链路探针」验证真机链路")
+        registry.register(ProbePlugin(name="链路探针" if lang == "zh" else "Link probe", slice_weight=1.0))
+        notes.append(tr(lang, "probe_only"))
     return registry, notes
 
 
@@ -92,6 +146,7 @@ CONFIG_FIELDS: dict[str, tuple[type, bool]] = {
     "scenario": (str, False),
     "bins_out": (int, False),
     "store_path": (str, False),
+    "lang": (str, False),
 }
 
 
@@ -106,6 +161,7 @@ class HostConfig:
     scenario: str = "mixed"
     bins_out: int = DEFAULT_BINS_OUT
     store_path: str = ""  # 空 = 不入库
+    lang: str = "zh"  # 界面语言（zh/en），只影响 Python 侧发给界面的那几条文案
 
     @classmethod
     def from_json(cls, text: str) -> "HostConfig":
@@ -126,6 +182,9 @@ class HostConfig:
                 setattr(cfg, key, int(value))
             else:
                 setattr(cfg, key, str(value))
+        cfg.lang = (cfg.lang or "zh").lower()
+        if cfg.lang not in LANGS:
+            raise ValueError(f"未知语言：{cfg.lang}（可选 {'/'.join(LANGS)}）")
         if cfg.scenario not in SCENARIOS:
             raise ValueError(f"未知场景：{cfg.scenario}（可选 {', '.join(sorted(SCENARIOS))}）")
         return cfg
@@ -160,11 +219,18 @@ class HostSession:
     def __post_init__(self) -> None:
         self.registry, self.notes = build_registry()
 
+    @property
+    def lang(self) -> str:
+        return (self.config.lang if self.config else "zh") or "zh"
+
     # ---- 启停 ------------------------------------------------------------
     def open(self, config: HostConfig) -> dict[str, Any]:
         """打开链路（真机 or 假固件）并建好调度器。返回信息块给前端顶部显示。"""
         config.validate()
         self.config = config
+        # 语言可能在 open() 时才确定（前端点「开始」才下发），这里重建一次说明文案
+        if (config.lang or "zh") != "zh" or not self.notes:
+            self.registry, self.notes = build_registry(config.lang)
         factory = None
         if config.mock:
             scenario = config.scenario
@@ -289,6 +355,17 @@ class HostSession:
             return {"kind": "stats", "plugins": [], "slices": 0, "snapshots": 0, "elapsed_s": 0.0}
         return {"kind": "stats", "uptime_s": round(time.time() - self.started_at, 1), **stats.as_dict()}
 
+    def _plugin_requests(self) -> list[tuple[Any, list[Any]]]:
+        """(插件, 扫描请求列表)；没实现 scan_requests 的插件给空表。"""
+        pairs: list[tuple[Any, list[Any]]] = []
+        for plugin in self.registry.plugins:
+            try:
+                requests = list(plugin.scan_requests()) if hasattr(plugin, "scan_requests") else []
+            except Exception:  # noqa: BLE001 - 计划拿不到就画不出频段条，但不该拖垮界面
+                requests = []
+            pairs.append((plugin, requests))
+        return pairs
+
     def describe(self) -> dict[str, Any]:
         """链路自报 + 模块清单 + 扫描计划数目（前端顶部那一排）。"""
         link = self.link
@@ -299,6 +376,7 @@ class HostSession:
             "mock": bool(self.config and self.config.mock),
             "scenario": self.config.scenario if self.config else "",
             "gain_index": self.config.gain_index if self.config else None,
+            "lang": self.lang,
             "identity": "",
             "transport": "",
             "caps": [],
@@ -309,10 +387,16 @@ class HostSession:
                     "id": p.id,
                     "name": p.name,
                     "weight": p.slice_weight,
-                    "requests": len(p.scan_requests()) if hasattr(p, "scan_requests") else 0,
+                    "requests": len(requests),
                 }
-                for p in self.registry.plugins
+                for p, requests in self._plugin_requests()
             ],
+            # 扫描计划（每窗的中心/带宽，按扫描顺序）—— 前端据此画频段条与游标，
+            # 不在这里写死 2.4G/5G 的边界，换实验时前端零改动。
+            "plans": {
+                p.id: [[int(req.freq_hz), int(req.bw_hz)] for req in requests]
+                for p, requests in self._plugin_requests()
+            },
         }
         if link is not None:
             try:
@@ -324,7 +408,9 @@ class HostSession:
                     for fs, _code, bins, _start, dwell, _cont in link.profiles()
                 ]
             except Exception as exc:  # noqa: BLE001
-                info["notes"].append(f"读链路信息失败：{type(exc).__name__}: {exc}")
+                info["notes"].append(
+                    tr(self.lang, "read_link_failed", error=f"{type(exc).__name__}: {exc}")
+                )
         return info
 
     def render_text(self) -> str:
