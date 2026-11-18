@@ -119,9 +119,11 @@ bool scan_fsm_command(char *line) {
         return true;
     }
     if (!strcmp(line, "FSM STOP")) {
-        bool was = fsm.running;
+        unsigned was = fsm.running ? 1u : 0u;
         fsm_reset();
-        if (was) reply("FSMEND 0\n"); /* 帧流到此为止：主机侧读到这里就收工 */
+        /* 总是应答：主机靠它判断「已经停稳、可以发 GAIN / CAP 了」。
+         * 参数表示之前到底在不在扫，便于主机区分「停了个空」与「真停了」。 */
+        reply_fmt("FSMEND %u\n", was);
         return true;
     }
     unsigned bins, rate, det, repeats = 0;

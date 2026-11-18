@@ -16,6 +16,7 @@
     lastSpectrumAt: 0,
     status: { name: "idle", key: "status.idle", raw: null },
     port: "COM56",
+    ports: [],
     kvPairs: [],
   };
 
@@ -149,32 +150,67 @@
   window.addEventListener("langchange", () => {
     if (window.Gain) Gain.relabel();
     rerenderKv();
+    renderPorts();
     const st = state.status;
     setStatus(st.name, st.key, st.raw);
+    // 旧日志行是切换前那种语言写的，清掉再写一行提示——否则英文界面里会留中文
+    const box = document.getElementById("log");
+    if (box) box.innerHTML = "";
+    log({ level: "info", text: T("log.langSwitched") });
+    // 告诉 Python：后续下行文案（日志/状态/表格）改用新语言
+    if (window.Bridge && Bridge.ready()) {
+      Bridge.call("setLang", I18N.lang()).catch(() => { /* 未连接时忽略 */ });
+    }
   });
 
+  /**
+   * 串口名字带 Windows 自带的描述（中文系统上是「USB 串行设备」）。
+   * 描述是操作系统给的、我们翻不了；英文界面下只留设备名（COM56），
+   * 否则英文界面里必定漏出一句中文。
+   */
+  function portLabel(info) {
+    const desc = info && info.description ? String(info.description) : "";
+    const device = (info && info.device) || "";
+    if (!desc) return device;
+    if (I18N.lang() === "en" && /[\u3400-\u4dbf\u4e00-\u9fff]/.test(desc)) return device;
+    return device + " · " + desc;
+  }
+
   // ---- 顶栏 -------------------------------------------------------------
-  async function loadPorts() {
+  /** 把已读到的串口列表按当前语言重画（切语言时描述要跟着变/去中文） */
+  function renderPorts() {
     const select = document.getElementById("port");
-    let ports = [];
-    try { ports = await Bridge.call("listPorts"); } catch (err) { log({ level: "err", text: T("log.portsFailed", { error: err }) }); }
+    if (!select) return;
+    const keep = select.value || state.port;
     select.innerHTML = "";
-    ports.forEach((info) => {
+    state.ports.forEach((info) => {
       const opt = document.createElement("option");
       opt.value = info.device;
-      opt.textContent = info.device + (info.description ? " · " + info.description : "");
+      opt.textContent = portLabel(info);
       select.appendChild(opt);
     });
-    if (!ports.length) {
+    if (!state.ports.length) {
       const opt = document.createElement("option");
       opt.value = "";
       opt.textContent = "—";
       select.appendChild(opt);
+      return;
+    }
+    const prefer = state.ports.find((p) => p.device === keep)
+      || state.ports.find((p) => p.device === "COM56")
+      || state.ports[0];
+    if (prefer) select.value = prefer.device;
+  }
+
+  async function loadPorts() {
+    let ports = [];
+    try { ports = await Bridge.call("listPorts"); } catch (err) { log({ level: "err", text: T("log.portsFailed", { error: err }) }); }
+    state.ports = ports || [];
+    renderPorts();
+    if (!state.ports.length) {
       log({ level: "err", text: T("log.noPorts") });
       return;
     }
-    const prefer = ports.find((p) => p.device === state.port) || ports.find((p) => p.device === "COM56") || ports[0];
-    if (prefer) select.value = prefer.device;
   }
 
   async function loadScenarios() {

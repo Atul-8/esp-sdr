@@ -208,6 +208,7 @@ window.Popout = (function () {
     pausedFor = null;
     // 浮层和面板都不在文档里 = 真被上一页的 innerHTML 一起清掉了，只复位状态
     if (overlay && !overlay.isConnected && !(panel && panel.isConnected)) {
+      clearTitle();
       overlay = null;
       stage = null;
       bar = null;
@@ -239,6 +240,9 @@ window.Popout = (function () {
       home = null;
     }
     overlay.hidden = true;
+    // 标题是面板标题的一份副本；面板已经搬回去了，副本留着会变成「幽灵文案」
+    // （浮层隐藏着没人看见，但自检扫 DOM 会扫到，英文界面里就漏出一句中文）。
+    clearTitle();
     const was = panel;
     panel = null;
     home = null;
@@ -329,6 +333,20 @@ window.Popout = (function () {
   function titleOf(node) {
     const t = node.querySelector(".panel__title");
     return t ? t.textContent.trim() : "panel";
+  }
+
+  /** 浮层标题是从面板标题抄下来的一份副本，面板标题换了语言就得再抄一次。 */
+  function refreshTitle() {
+    if (!overlay || !panel) return;
+    const node = overlay.querySelector(".popout__title");
+    if (node) node.textContent = titleOf(panel);
+  }
+
+  /** 关掉浮层时把标题清空：面板已经搬回去，副本留着就是幽灵文案。 */
+  function clearTitle() {
+    if (!overlay) return;
+    const node = overlay.querySelector(".popout__title");
+    if (node) node.textContent = "";
   }
 
   // ---- 缩放 ---------------------------------------------------------------
@@ -515,7 +533,7 @@ window.Popout = (function () {
     I18N.apply(bar);
     applyChrome();
     markFull();
-    if (panel) overlay.querySelector(".popout__title").textContent = titleOf(panel);
+    refreshTitle();
     // 暂停提示是动态文案（带页面名），I18N.apply 翻不到，得按当前语言重写一遍
     if (pausedFor) setPaused(true, activePage || pausedFor);
   }
@@ -596,6 +614,7 @@ window.Popout = (function () {
     openSolo,
     openDocked,
     selftest,
+    refreshTitle,
     get current() { return panel; },
     get zoom() { return zoom; },
   };

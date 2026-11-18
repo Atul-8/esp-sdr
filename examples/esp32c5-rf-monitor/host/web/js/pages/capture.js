@@ -13,24 +13,24 @@ window.Pages.capture = (function () {
   let root = null;
   let lastPayload = null;
 
-  //: 门槛 → 展示名（只用于表格第一列，值永远来自 payload）
+  //: 门槛字段 → 词典后缀（只用于两列表头；值永远来自 payload.thresholds）
   const TH_LABELS = {
-    alert_db: ["cap.th.alert", "判成信号的抬升下限"],
-    narrow_alert_db: ["cap.th.narrow", "窄段（< narrow_max_hz）要求更高"],
-    narrow_max_hz: ["cap.th.narrowMax", "窄段宽度上限"],
-    busy_fill: ["cap.th.busy", "窗内抬起格占比上限（超了算环境饱和）"],
-    min_span_s: ["cap.th.minSpan", "环形缓冲最少覆盖时长"],
-    frame_min_gap_s: ["cap.th.frameGap", "帧抽稀间隔"],
-    occ_excess_db: ["cap.th.occ", "算「占空」时的抬升口径"],
-    hop_fill: ["cap.th.hopFill", "算「占空」时单帧抬起的比例"],
-    steady_fill: ["cap.th.steadyFill", "「持续」判据的占空下限"],
-    min_frames: ["cap.th.minFrames", "最少连续帧数"],
-    min_width_hz: ["cap.th.minWidth", "段宽度下限"],
-    max_width_hz: ["cap.th.maxWidth", "段宽度上限（整窗）"],
-    retrigger_s: ["cap.th.retrigger", "同频点重复抑制窗口"],
-    max_captures: ["cap.th.maxCaptures", "整轮抓档上限"],
-    capture_samples: ["cap.th.samples", "每次抓多少样本（固件上限）"],
-    capture_rate_code: ["cap.th.rate", "抓档采样率码"],
+    alert_db: "alert",
+    narrow_alert_db: "narrow",
+    narrow_max_hz: "narrowMax",
+    busy_fill: "busy",
+    min_span_s: "minSpan",
+    frame_min_gap_s: "frameGap",
+    occ_excess_db: "occ",
+    hop_fill: "hopFill",
+    steady_fill: "steadyFill",
+    min_frames: "minFrames",
+    min_width_hz: "minWidth",
+    max_width_hz: "maxWidth",
+    retrigger_s: "retrigger",
+    max_captures: "maxCaptures",
+    capture_samples: "samples",
+    capture_rate_code: "rate",
   };
 
   function fmtHz(hz) {
@@ -67,7 +67,7 @@ window.Pages.capture = (function () {
       .then((data) => {
         // Bridge.call 已经把 JSON 解成对象了；只有老路径才给字符串
         if (typeof data === "string") {
-          try { data = JSON.parse(data || "{}"); } catch (err) { data = { ok: false, headline: "解析失败", why: String(err) }; }
+          try { data = JSON.parse(data || "{}"); } catch (err) { data = { ok: false, headline: T("cap.parseFailed"), why: String(err) }; }
         }
         renderAudit(data || {});
       })
@@ -90,7 +90,7 @@ window.Pages.capture = (function () {
     } else {
       rows.forEach((row) => {
         const tr = document.createElement("tr");
-        const cls = row.level === "可疑" ? "tag--heavy" : row.level === "需复核" ? "tag--light" : "tag--idle";
+        const cls = U.levelClass(row.level);
         tr.innerHTML =
           "<td>" + esc(row.source || "") + "</td>" +
           "<td>" + esc(row.kind || "") + "</td>" +
@@ -244,7 +244,7 @@ window.Pages.capture = (function () {
           "<td>" + esc(Number(s.freq_mhz || 0).toFixed(1)) + " MHz</td>" +
           "<td>" + esc(Number(s.width_khz || 0).toFixed(0)) + " kHz</td>" +
           "<td>" + esc(((Number(s.fill || 0)) * 100).toFixed(0)) + " %</td>" +
-          "<td>" + esc(Number(s.peak_excess_db || 0).toFixed(0)) + " 码</td>" +
+          "<td>" + esc(T("cap.filter.codes", { n: Number(s.peak_excess_db || 0).toFixed(0) })) + "</td>" +
           "<td>" + esc(Number(s.duration_s || 0).toFixed(1)) + " s</td>";
         sbody.appendChild(tr);
       });
@@ -255,7 +255,6 @@ window.Pages.capture = (function () {
     tbody.innerHTML = "";
     Object.keys(TH_LABELS).forEach((key) => {
       if (th[key] === undefined) return;
-      const [labelKey, whyKey] = TH_LABELS[key];
       const value = th[key];
       let shown;
       if (key.endsWith("_hz")) shown = fmtHz(value);
@@ -263,7 +262,8 @@ window.Pages.capture = (function () {
       else shown = String(value);
       const tr = document.createElement("tr");
       tr.innerHTML =
-        "<td>" + esc(T(labelKey)) + '<span class="muted"> · ' + esc(T(whyKey)) + "</span></td>" +
+        "<td>" + esc(T("cap.th." + TH_LABELS[key])) + '<span class="muted"> · ' +
+        esc(T("cap.why." + key)) + "</span></td>" +
         "<td>" + esc(shown) + "</td>";
       tbody.appendChild(tr);
     });

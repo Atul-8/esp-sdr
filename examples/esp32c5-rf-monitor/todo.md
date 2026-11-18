@@ -20,6 +20,7 @@
 | 5 | `feat/5-capture` | 可疑信号抓拍（含分类器） | `[REVIEW]` 待人类验收（四道门 + 真板 4 根杂散报清单不抓 + 3 条存证 + 抓档页/一键体检/场景矩阵 9/9 + 判据回放 7/7） |
 | T | `feat/host-gui` | 图形上位机（WebView，跨阶段工具，不占功能阶段） | `[REVIEW]` 待人类验收（含双击弹出预览 + 高度自适应 + 真全屏 + 独立窗口 + 2D 瀑布频率轴 + 周期瀑布图页 + 抓档页 + 一键体检） |
 | 6 | `integration` | 五合一合并 + 总验收报告 + tag `v1.0.0` | `[REVIEW]` 待人类整体验收（六步合并逐个跑单测 58→271、矩阵 10/10、判据回放 7/7、整场仿真 OK、自检 44 checks 全绿） |
+| 7 | `feat/7-fsm` | 设备端扫频状态机（方案 A）+ 上位机英文界面零中文 | `[REVIEW]` 待人类验收（固件 `scan_fsm` 真板 16.89 窗/秒；`engine=host\|device` 双引擎自检 52 checks 全绿；英文界面 6 页 DOM 扫描 0 中文） |
 
 ---
 
@@ -507,6 +508,92 @@ epo\examples\esp32c5-rf-monitor`；`ESPSDR_SRC=/tmp` 正确抛错 |
 3. 单射频分时共享：5 个模块各 20% 时间片，单模块灵敏度低于独占（5.8G 告警在共享跑法下会漏，见双列表）；
 4. 分类器是启发式的（只看带宽/持续/占空比），不做调制识别、不做设备级归因；
 5. 「未抓到」≠「房间里没有摄像头」：看不到离线存储型设备、看不到非 ISM 频段。
+
+---
+
+## [REVIEW] 7. 设备端扫频状态机（feat/7-fsm）
+
+**开工依据**：人类 2026-11-21 授权「方案 A」——把「谁掐表」搬进固件，判据一行不搬。
+
+### 做了什么
+
+| 侧 | 内容 |
+| --- | --- |
+| 固件 | `main/common/scan_fsm.{c,h}`（计划表 + 状态机 + 空闲钩子推进）、`spectrum_sweep_frame()`、`burst_serial_serve_idle()`、`CAPS` 加 `FSM`、`FSMPLAN*` / `FSM START\|STOP\|?` 六条命令 |
+| 主机 | `core/sweep_source.py`（后台排空线程 + 窗缓存）、`core/serial_link.py`（FSM 订阅 / 读帧）、`host/session.py`（`engine` 配置）、`host/app.py --engine`、`testing/sweep_real.py`、`testing/fsm_probe.py` |
+| 文档 | `docs/07-fsm.md`（含主机侧引擎口径、`plan_dwell_ms` 标定、pace/stale 语义、真板数字） |
+
+**线上帧格式一个字节都没改**：仍是每窗 `SPEC` 头行 + 一帧 `SPC1`，主机的帧解析器原样复用。
+所以回放、场景矩阵、真板标定全部继续有效。
+
+### 验收材料 → 实测
+
+| 项 | 命令 | 结果 |
+| --- | --- | --- |
+| 固件协议探针（真板 COM56） | `python testing/fsm_probe.py` | **8/8**（caps/plan/start/frames/rotate/stop/idle/no-frames-after-stop） |
+| 设备自扫 30 s（真板） | `python testing/sweep_real.py --seconds 30` | `frames 301 / misses 0 / distinct_mhz 90 / snapshots 235 / 9.75 帧每秒` |
+| 驻留封顶 20 ms（真板） | 同上 `--plan-dwell 20` | `frames_per_s 30.72` |
+| 主机逐窗对照 | `python testing/sweep_real.py --engine host --mock --seconds 6` | `frames 2174 / frames_src host-snapshots / 343.97 每秒 / [OK]` |
+| 双引擎自检 | `cd host && python app.py --selftest --seconds 10 --mock [--engine device]` | 两条都是 `ok:true` / **52 checks** / `fail:[]` |
+| 全量单测 | `python -m unittest discover -s tests -t .` | **280 tests OK**（71 s） |
+| 会话级（两引擎） | `cd host && python tests/test_sweep_session.py -v` | **9 tests OK** |
+
+### 边界
+
+1. 不省射频时间：采样率 / 点数 / 驻留都没变，省的只是串口往返；
+2. `engine=device` 的窗/秒是**串口带宽的函数**（10.2 @bins=1024 / 16.9 @bins=512），不是固件上限；
+3. 自扫期间**禁止**发 `GAIN` / `CAP20`：它们和扫频共用射频，必须先 `FSM STOP`；
+4. `FSM STOP` 后串口里还压着已发出的帧，停止 = 「边排空边找 `FSMEND`」；
+5. 设备不支持时自动退回 `host` 并如实回报，不静默降级。
+
+---
+
+## [REVIEW] 7.1 上位机英文界面零中文
+
+**人类硬要求**：英文环境下，除「中文(CN)」语言切换按钮本身，任何界面文案 / 动态内容 /
+表格 / 提示 / 弹窗 / ASCII 输出都不得出现中文。
+
+### 为什么不是「前端整块翻译」
+
+界面上的中文有两个来源：网页静态词条（前端词典能管）和**模块现算的判词/表格/体检结论**
+（`modes/`、`app/audit.py` 里全是中文，还带数字）。第二类没法在新前端翻——逐行翻会打碎
+定宽对齐，而且数字一改模板就对不上。所以定了「**Python 侧下行本地化**」：
+
+| 层 | 手段 |
+| --- | --- |
+| 静态词条 | `web/js/i18n.js` 双语词典；`T(key)` 在 `en` 缺 key **不回退中文**，返回 key 本身并记进 `missing()`（宁可亮 key 让自检抓，也不静默漏中文） |
+| 模块产出 | `host/l10n.py`：中文串 → 数字段折叠成 `{}` 的「骨架」→ 查表换英文模板；**翻不到就原样返回，绝不抛异常**；只翻值不翻 key |
+| 下行出口 | `tables()` / `describe()` / `stats()` / `sweep_state()` / `gain_state()` / `audit()` 全部过 `_out(payload)` |
+| ASCII 页 | `render_text()` 英文模式**不再逐行翻模块 ASCII**，改从已本地化的 `tables()` payload 拼英文纯文本 |
+| 兜底 | OS 给的串口描述（`USB 串行设备`）在 en 模式直接丢弃，只留 `COM56` |
+
+### 顺手修掉的「英文下逻辑会错」
+
+`level`/`risk_type` 这些字段在英文模式下**值已经变成英文**，而前端多处拿中文字面量比较
+（决定标签颜色、3D 柱高、推荐信道色调）。新增 `U.levelKey()` / `U.riskClass()`：中英两套
+写法映射到同一个语言无关的键，颜色/标签判断一律走它。
+
+### 验收材料 → 实测
+
+| 项 | 命令 | 结果 |
+| --- | --- | --- |
+| 下行 payload（10 场景 × 6 出口 + `render_text`） | `cd host && python tests/test_l10n.py -v` | **10 tests OK**（84 s）；en 残留 0 / zh 仍有大量中文（防误翻） |
+| 反向验证（清空词典） | 同上临时把 `l10n.TABLE` 清空 | **失败并报出 3586 条**残留 —— 证明这条断言真会抓东西 |
+| 网页 DOM（6 页全扫） | `cd host && python app.py --selftest --seconds 10 --mock` | `en_cjk.hitCount = 0`、`missingCount = 0`（`en_no_cjk` / `en_keys_complete` 全绿） |
+| 骨架缺口自查 | `python testing/chk_l10n.py` | `英文模式下仍未翻掉的中文串 0 条 / 缺条目 0 / 占位不符 0` |
+| 网页源码静态残留 | `python testing/_web_cjk.py` | 非兜底中文只剩「双语言映射表」与注释（兜底值都会被词典覆盖，DOM 扫描已证实） |
+
+自检的门槛写死在 `host/app.py`：`CJK_SCAN_JS` 走 `TreeWalker` 扫 body 全部文本 + `[title]` /
+`[placeholder]` / `option`，豁免 `[data-lang-toggle]`（只有这一个按钮允许中文）；逐页 1.7 s
+（`raw` 页 2.6 s）等渲染再扫，6 页一轮。
+
+### 边界
+
+1. **命令行/终端输出仍是中文**：本轮只要求图形界面英文零中文，`app.live` 等 CLI 不动；
+2. **模块判据一个字没改**：`modes/` 里的门槛、判词顺序、边界声明全部原样，英文只是文案层；
+3. 英文模板是「骨架匹配 + 数字回填」，**新增判词必须同时补 `host/l10n.py` 的 TABLE**，
+   否则该条会原样漏中文 —— `tests/test_l10n.py` 就是拦这个的；
+4. `_web_cjk.py` 里剩余的英文模式中文属于**双语言映射表**（逻辑用，不上屏），不是漏翻。
 
 ---
 

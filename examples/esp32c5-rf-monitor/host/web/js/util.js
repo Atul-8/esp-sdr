@@ -17,26 +17,70 @@ window.U = (function () {
   function fmtPct(x, digits) { return (Number(x) * 100).toFixed(digits === undefined ? 1 : digits) + "%"; }
   function fmtDb(x) { const v = Number(x) || 0; return (v >= 0 ? "+" : "") + v.toFixed(0) + " dB"; }
 
+  /**
+   * 档位/等级 → 语言无关的键（zh/en 两套写法都认）。
+   * 英文界面下模块给的已经是被 host/l10n.py 翻过的英文（``Heavy``/``Idle``/``Suspicious``），
+   * 所以「按档位决定颜色/标签」这类判断绝不能直接比中文字面量。
+   */
+  const LEVEL_KEYS = {
+    "重度": "heavy", Heavy: "heavy",
+    "拥挤": "crowded", Crowded: "crowded",
+    "轻度": "light", Mild: "light",
+    "空闲": "idle", Idle: "idle",
+    "无覆盖": "none", "No cov.": "none", "No coverage": "none",
+    "可疑": "suspicious", Suspicious: "suspicious",
+    "需复核": "review", "Needs review": "review",
+    "关注": "watch", Watch: "watch",
+    "低": "low", Low: "low",
+    "未知": "unknown", Unknown: "unknown",
+  };
+
+  function levelKey(level) {
+    if (!level) return "unknown";
+    return LEVEL_KEYS[level] || "unknown";
+  }
+
   /** 分档 → CSS class（表格标签用） */
   function levelClass(level) {
-    switch (level) {
-      case "重度": return "tag--heavy";
-      case "拥挤": return "tag--crowded";
-      case "轻度": return "tag--light";
-      case "无覆盖": return "tag--none";
+    switch (levelKey(level)) {
+      case "heavy": return "tag--heavy";
+      case "crowded": return "tag--crowded";
+      case "light": return "tag--light";
+      case "none": return "tag--none";
+      case "suspicious": return "tag--heavy";
+      case "review": return "tag--light";
       default: return "tag--idle";
     }
   }
 
   /** 分档 → 颜色（3D/2D 都用同一套，颜色含义别乱改） */
   function levelColor(level) {
-    switch (level) {
-      case "重度": return "#f87171";
-      case "拥挤": return "#fbbf24";
-      case "轻度": return "#4ade80";
-      case "无覆盖": return "#475569";
+    switch (levelKey(level)) {
+      case "heavy": return "#f87171";
+      case "crowded": return "#fbbf24";
+      case "light": return "#4ade80";
+      case "none": return "#475569";
       default: return "#38bdf8";
     }
+  }
+
+  /**
+   * BLE 风险类型 → 卡片色调 class。
+   * 与 :func:`levelKey` 同理：英文界面下 ``payload.risk_type`` 已经是英文。
+   */
+  const RISK_CLASSES = {
+    "无明显风险": "ok", "no obvious risk": "ok",
+    "轻微干扰": "light", "mild interference": "light",
+    "蓝牙设备密度型": "heavy", "Bluetooth density": "heavy",
+    "WiFi 压制型": "heavy", "WiFi dominated": "heavy",
+    "混合型": "heavy", mixed: "heavy",
+    "复杂噪音（多源混合）": "flat", "complex noise (multi-source mixed)": "flat",
+    "宽带常开/形状疑似": "flat", "wideband always-on / suspicious shape": "flat",
+    "无数据": "flat", "no data": "flat",
+  };
+
+  function riskClass(name) {
+    return RISK_CLASSES[name] || "flat";
   }
 
   /** 分档 → 当前语言显示名（数据里的档位值永远是中文，翻译只在显示层） */
@@ -161,7 +205,7 @@ window.U = (function () {
 
   return {
     fmtHz, fmtMHz, fmtPct, fmtDb,
-    levelClass, levelColor, levelText,
+    levelClass, levelColor, levelText, levelKey, riskClass,
     heat, heatT, heatHex, heatHexT, heatRGB,
     AutoRange, el, fitCanvas, fitScale, fitGrow,
   };

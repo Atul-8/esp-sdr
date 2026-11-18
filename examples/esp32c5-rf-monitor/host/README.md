@@ -12,7 +12,9 @@ host/
 ├── session.py         # 纯 Python 逻辑层（无 Qt，可单独测）：配置校验 / 会话 / 频谱打包
 ├── start.bat          # Windows 双击启动（缺依赖自动装）
 ├── requirements.txt   # PySide6 + pyserial
+├── l10n.py            # 下行文案本地化：中文串骨架匹配 → 英文模板（翻不到原样返回）
 ├── tests/test_session.py  # 25 条无窗口自测（含页面门控 2 条）
+├── tests/test_l10n.py     # 英文界面零中文（10 场景 × 全部下行出口 + ASCII 页）
 ├── tests/probe_popout.py  # 弹窗切页行为快速探针（20 s 出结果，迭代弹窗逻辑用它）
 └── web/
     ├── index.html     # 唯一入口：顶栏 + 导航 + #page-container + 页脚
@@ -25,7 +27,7 @@ host/
     │   ├── router.js  # 按 registry.json 加载片段（XHR，QWebEngine 不支持 file:// 的 fetch）
     │   ├── popout.js  # 双击任意面板 → 全窗口预览 + 自定义缩放 + 全屏 + 独立窗口
     │   ├── scanbar.js # 扫频进度条（2.4G/5G 频段地图 + 回卷游标）
-    │   ├── i18n.js    # 中英切换（只翻外壳 + 结构化数据）
+    │   ├── i18n.js    # 中英切换：静态词条；en 缺 key 不回退中文（亮 key 让自检抓）
     │   ├── app.js     # 外壳装配 + 事件路由 + 自检探针 window.probeReport()
     │   └── pages/     # 各实验自己的渲染逻辑
     └── pages/
@@ -49,17 +51,21 @@ python host/app.py --port COM56 --gain-mode HARDWARE                   # 固件�
 # 2) 没板也能看：假固件 + 内置场景
 python host/app.py --mock --scenario wifi_busy
 
-# 3) 无人工干预自检（跑 10s → 走完六个页面 + 增益控件 + 窗口缩放 → 打印 JSON 报告 → 退出码 0/2）
+# 3) 无人工干预自检（跑 10s → 走完六个页面 + 增益控件 + 窗口缩放 + 英文零中文 → 打印 JSON 报告 → 退出码 0/2）
 python host/app.py --selftest --seconds 10 --shot out.png
 python host/app.py --selftest --real --port COM56 --gain-index 60 --seconds 12
-#    → 报告末尾 "checks": 44 项全 true，退出码 0（假固件与真板都验过）
+python host/app.py --selftest --seconds 10 --mock --engine device   # 设备自扫引擎
+#    → 报告末尾 "checks": 52 项全 true，退出码 0（host / device 两条引擎都验过）
 #    ⚠️ 别把 --seconds 压到 8：页面探针没跑完，画布/瀑布那几项会假红
+#    ⚠️ 自检会真的切一次语言并逐页扫 DOM：`en_no_cjk` / `en_keys_complete` 红了就是英文界面
+#       里漏了中文（补 host/l10n.py 的 TABLE 或 web/js/i18n.js 的 en 词典）
 
 # 4) 指定窗口尺寸（验「窗口态也不裁按钮」）
 python host/app.py --mock --window-size 1024x680
 
 # 逻辑层自测（不开窗口）
 python -m unittest discover -s host/tests -t . -v
+python tests/test_l10n.py -v          # 英文下行零中文（10 场景 × 6 出口 + ASCII 页）
 ```
 
 Windows 上也可以双击 `host/start.bat`（缺依赖会自动 `pip install`）。

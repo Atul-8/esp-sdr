@@ -36,7 +36,7 @@ from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QApplication
 
 import paths  # noqa: E402 - 本地模块，负责定位分析层
-from session import LANGS, WEB_DIR, HostConfig, HostSession, list_ports, to_json, tr  # noqa: E402
+from session import ENGINES, LANGS, WEB_DIR, HostConfig, HostSession, list_ports, to_json, tr  # noqa: E402
 
 #: 分析层目录（core/ modes/ 所在）。找不到会在这里就抛明确的错误。
 SRC_DIR = paths.ensure_on_path()
@@ -256,6 +256,11 @@ class Bridge(QObject):
             return tr(self._window.lang, "not_connected")
         return session.render_text()
 
+    @Slot(str, result=str)
+    def setLang(self, lang: str) -> str:  # noqa: N802 - JS 侧用驼峰
+        """界面切语言：``en`` 之后所有下行文案（日志/状态/表格/体检）改出英文。"""
+        return to_json(self._window.set_lang(lang))
+
     # ---- 控制 -------------------------------------------------------------
     @Slot(str, result=str)
     def start(self, config_json: str) -> str:  # noqa: N802
@@ -371,10 +376,10 @@ class Runner(QThread):
                 if stats is not None and (now - last_slow >= TABLE_INTERVAL or epoch != last_epoch):
                     last_slow = now
                     last_epoch = epoch
+                    modules = needed_modules(self.view, self.module_ids)
                     snapshot = session.stats(stats)
                     self.box["stats"] = snapshot  # 收尾时 scheduler 已拆，自检靠这份留档
                     bridge.stats.emit(to_json(snapshot))
-                    modules = needed_modules(self.view, self.module_ids)
                     # 空清单（只有「实时频谱」页在看）就别算了：这一页不吃任何模块表格
                     if modules or epoch == 0:
                         bridge.tables.emit(to_json(session.tables(modules or None)))
@@ -676,6 +681,22 @@ class HostWindow(QObject):
         message = tr(config.lang, "started", what=info.get("identity") or config.port)
         return {"ok": True, "message": message, "info": info}
 
+    def set_lang(self, lang: str) -> dict[str, object]:
+        """切界面语言：窗口 / 会话 / 射频线程三处一起换（只影响文案，不动判据）。
+
+        ``Runner.lang`` 是普通字符串，射频线程只在自己线程里读它；
+        主线程做的是整体替换引用（CPython 下原子），不会读到半个字符串。
+        """
+        lang = (lang or "zh").lower()
+        if lang not in LANGS:
+            return {"ok": False, "lang": self.lang, "error": "unknown language"}
+        self.lang = lang
+        if self.session is not None:
+            self.session.set_lang(lang)
+        if self.runner is not None:
+            self.runner.lang = lang
+        return {"ok": True, "lang": lang}
+
     def stop_run(self) -> dict[str, object]:
         if self.runner is None or not self.runner.isRunning():
             return {"ok": False, "message": tr(self.lang, "no_run")}
@@ -712,6 +733,12 @@ def build_app(argv: list[str]) -> tuple[QApplication, QWebEngineView, HostWindow
     parser.add_argument("--shot", default="", help="--selftest 截图保存路径")
     parser.add_argument("--window-size", default="1440x900", help="窗口尺寸 WxH")
     parser.add_argument("--lang", default="zh", choices=list(LANGS), help="界面默认语言（网页里还能切，切换后记在 localStorage）")
+    parser.add_argument(
+        "--engine",
+        default="host",
+        choices=list(ENGINES),
+        help="采集引擎：host = 主机逐窗驱动（默认）；device = 设备自扫（调度在固件里，判据仍在主机）",
+    )
     args = parser.parse_args(argv)
 
     app = QApplication(sys.argv[:1])
@@ -734,6 +761,121 @@ def build_app(argv: list[str]) -> tuple[QApplication, QWebEngineView, HostWindow
     return app, view, window, args
 
 
+def device_engine_probe(seconds: float = 1.2, bins_out: int = 256) -> dict[str, object]:
+    """自检里顺手验一遍「设备自扫」引擎（假固件，不开窗口、不占真串口）。
+
+    验的是方案 A 真正动到的那条链路：下发计划 → 设备自己吐帧 → 主机解帧 → 进调度。
+    判据只有一条：**真拿到帧**。帧数为 0 说明订阅模式没接上，必须红。
+    """
+    report: dict[str, object] = {"ok": False, "engine": "", "note": ""}
+    session = HostSession(bins_out=bins_out)
+    try:
+        info = session.open(
+            HostConfig.from_json(
+                to_json(
+                    {
+                        "mock": True,
+                        "scenario": "mixed",
+                        "engine": "device",
+                        "gain_mode": "MANUAL",
+                        "bins_out": bins_out,
+                    }
+                )
+            )
+        )
+        report["engine"] = str(info.get("engine", ""))
+        report["note"] = str(info.get("engine_note", ""))
+        report["supported"] = bool(info.get("sweep_supported"))
+        seen: list[int] = []
+        session.step(seconds, on_snapshot=lambda snap: seen.append(int(snap.center_hz)))
+        state = session.sweep_state()
+        report.update(
+            {
+                "frames": int(state.get("frames", 0) or 0),
+                "windows": int(state.get("windows", 0) or 0),
+                "misses": int(state.get("misses", 0) or 0),
+                "snapshots": len(seen),
+                "distinct": len(set(seen)),
+            }
+        )
+        report["ok"] = report["engine"] == "device" and int(report["frames"]) > 0 and len(seen) > 0
+    except Exception as exc:  # noqa: BLE001 - 自检要报错不要抛
+        report["error"] = f"{type(exc).__name__}: {exc}"
+    finally:
+        try:
+            session.close()
+        except Exception:  # noqa: BLE001
+            pass
+    return report
+
+
+#: 英文界面「零中文」扫描：把 body 下所有文本节点 + title/placeholder/option 扫一遍。
+#: 只豁免语言切换按钮本身（它写着「中文(CN)」，那是给中文用户切回去的入口）。
+#: 自检必须可重复：先把上次跑存下的语言偏好清掉、强制回中文再开始，
+#: 否则上一次切到 en 存在 localStorage 里，这次一上来就是英文，
+#: 「底噪」这类中文断言会莫名其妙地挂（实际是状态串了）。
+LANG_RESET_JS = """
+(function () {
+  try { localStorage.removeItem("espsdr.lang"); } catch (e) {}
+  if (window.I18N) I18N.setLang("zh");
+  return "zh";
+})()
+"""
+
+CJK_SCAN_JS = """
+(function () {
+  var CJK = /[\\u3400-\\u4dbf\\u4e00-\\u9fff]/;
+  var exempt = [];
+  document.querySelectorAll("[data-lang-toggle]").forEach(function (n) { exempt.push(n); });
+  var hits = [];
+  function path(el) {
+    var out = [];
+    var n = el;
+    for (var i = 0; i < 4 && n && n.tagName; i++) {
+      out.push(n.tagName.toLowerCase() + (n.className ? "." + String(n.className).split(" ").join(".") : ""));
+      n = n.parentElement;
+    }
+    return out.join(" < ");
+  }
+  function add(where, text, el) {
+    var t = String(text === null || text === undefined ? "" : text).trim();
+    if (t && CJK.test(t)) hits.push(where + "@" + (el ? path(el) : "?") + ": " + t.slice(0, 140));
+  }
+  var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null);
+  while (walker.nextNode()) {
+    var node = walker.currentNode;
+    var skip = false;
+    var p = node.parentElement;
+    while (p) { if (exempt.indexOf(p) >= 0) { skip = true; break; } p = p.parentElement; }
+    if (!skip) add("text", node.nodeValue, node.parentElement);
+  }
+  document.querySelectorAll("[title],[placeholder]").forEach(function (n) {
+    add("title", n.getAttribute("title"), n);
+    add("placeholder", n.getAttribute("placeholder"), n);
+  });
+  document.querySelectorAll("option").forEach(function (n) { add("option", n.textContent, n); });
+  return JSON.stringify({
+    lang: window.I18N ? I18N.lang() : null,
+    page: (window.Router && Router.current) ? Router.current.id : null,
+    hits: hits.slice(0, 60),
+    hitCount: hits.length,
+    missing: window.I18N ? I18N.missingKeys() : null,
+    popouts: [].map.call(document.querySelectorAll(".popout"), function (o) {
+      var t = o.querySelector(".popout__title");
+      var p = o.querySelector(".popout__stage .panel .panel__title");
+      return {
+        connected: o.isConnected,
+        hidden: !!o.hidden,
+        title: t ? t.textContent : null,
+        panelTitle: p ? p.textContent : null,
+        hasPanel: !!o.querySelector(".popout__stage .panel")
+      };
+    })
+  });
+})()
+"""
+
+
 def run_selftest(app: QApplication, view: QWebEngineView, window: HostWindow, args: argparse.Namespace) -> int:
     """自动跑一段：证明链路 + 桥 + 三个页面都真的活着，打印证据并退出。
 
@@ -744,7 +886,7 @@ def run_selftest(app: QApplication, view: QWebEngineView, window: HostWindow, ar
     """
     report: dict[str, object] = {"ok": False, "pages": {}}
     steps: list[str] = []
-    started: dict[str, float] = {}
+    started: dict[str, object] = {}
 
     def fail(message: str) -> None:
         report["ok"] = False
@@ -878,9 +1020,16 @@ def run_selftest(app: QApplication, view: QWebEngineView, window: HostWindow, ar
             "scanbar_bands": len(bar_groups) >= 2 and int(bar.get("windows", 0) or 0) > 10,
             "scanbar_progress": (
                 # 与 waterfall 平分射频后 8s 内只走过 2 个窗（独占时 >3）；
-                # 这里守的是"游标在轨道内真的在动"，不是"动得快"
-                int(bar.get("visited", 0) or 0) >= 2
+                # 这里守的是"游标在轨道内真的在动"，不是"动得快"。
+                # 注意 device 引擎下窗是"按设备吐帧顺序"消费的，采样点可能刚好落在
+                # 一趟的**第一窗**（trail 里 visited=1）——所以"走完过一整趟(passes>=1)"
+                # 也算动过，别只看 visited（真板实测会误判）。
+                (
+                    int(bar.get("visited", 0) or 0) >= 2
+                    or int(bar.get("passes", 0) or 0) >= 1
+                )
                 and int(bar.get("index", -1)) >= 0
+                and len(bar.get("trail") or []) >= 2
                 and 0 <= int(bar.get("x", -1)) <= int(bar.get("width", 0) or 0)
             ),
             # 到终点回卷：喂到最后一格再喂第一格，轮次 +1、本轮覆盖清零
@@ -966,7 +1115,9 @@ def run_selftest(app: QApplication, view: QWebEngineView, window: HostWindow, ar
             == int((report.get("gain") or {}).get("index0", -9)) + 1,
             "gain_auto": str(((report.get("gain") or {}).get("auto") or {}).get("mode", "")) == "AUTO",
             "gain_on_button": list((report.get("gain") or {}).get("on") or []) == ["AUTO"],
-            "gain_readback": "底噪" in str((report.get("gain") or {}).get("read", "")),
+            # 读数由 JS 按当前语言渲染；自检跑到这一步可能已经切过英文，两种措辞都算过
+            "gain_readback": ("底噪" in str((report.get("gain") or {}).get("read", "")))
+            or ("floor" in str((report.get("gain") or {}).get("read", ""))),
             "raw_panels": int(raw.get("panels", 0) or 0) >= 1,
             "raw_text": int(raw.get("textLen", 0) or 0) > 40,
             # 瀑布图页：页面自报的画布/卡片/声明都到位，且热力图像素真画上了
@@ -1013,7 +1164,16 @@ def run_selftest(app: QApplication, view: QWebEngineView, window: HostWindow, ar
             and int(pp.get("spectrum_after", 0) or 0) == int(pp.get("spectrum_on_ble", 0) or 0),
             "waterfall_render": bool((report.get("waterfall_render") or {}).get("open"))
             and len(str((report.get("waterfall_render") or {}).get("files", ""))) > 10,
+            # 英文界面零中文（只放行「中文(CN)」切换按钮）+ en 词典不缺 key
+            "en_no_cjk": bool((report.get("en_cjk") or {}).get("pages"))
+            and int((report.get("en_cjk") or {}).get("hitCount", 1) or 0) == 0,
+            "en_keys_complete": bool((report.get("en_cjk") or {}).get("pages"))
+            and int((report.get("en_cjk") or {}).get("missingCount", 1) or 0) == 0,
         }
+        # 设备自扫引擎（方案 A）单独验一遍：跑假固件 1.2 s，必须有帧。
+        # 放在这里是因为它不依赖窗口，也不需要用户点任何东西。
+        report["device"] = device_engine_probe()
+        checks["device_engine"] = bool((report.get("device") or {}).get("ok"))
         report["checks"] = checks
         ok = all(checks.values())
         report["ok"] = ok
@@ -1413,6 +1573,60 @@ def run_selftest(app: QApplication, view: QWebEngineView, window: HostWindow, ar
         QTimer.singleShot(400, click_full)
         QTimer.singleShot(1800, read_out)
 
+    def en_cjk_test(then) -> None:
+        """英文界面「零中文」实测：逐页扫 DOM，缺 key 也算失败。
+
+        为什么要逐页扫而不是只扫静态文案：模块 payload（判词/表格/体检）是 Python 现算的，
+        哪一条漏翻只有真渲出来才知道；`I18N.missingKeys()` 则专门抓「en 词典少 key」。
+        """
+        pages = ["spectrum", "waterfall", "wifi", "ble", "capture", "raw"]
+        seen: dict[str, object] = {}
+        hits: list[str] = []
+        missing: set[str] = set()
+
+        def step(i: int) -> None:
+            if i >= len(pages):
+                report["en_cjk"] = {
+                    "pages": len(seen),
+                    "hits": hits[:40],
+                    "hitCount": len(hits),
+                    "missing": sorted(missing)[:40],
+                    "missingCount": len(missing),
+                    # 排障用：浮层标题是面板标题的副本，容易忘同步 → 留一份现场
+                    "popouts": (seen.get("raw") or {}).get("popouts"),
+                }
+                steps.append(
+                    f"英文零中文：{len(seen)} 页，残留 {len(hits)} 条，缺 key {len(missing)} 个"
+                )
+                then()
+                return
+            page_id = pages[i]
+            view.page().runJavaScript(f"Router.navigate('{page_id}')")
+
+            def collect(result: object, page_id: str = page_id) -> None:
+                try:
+                    payload = json.loads(str(result)) if result else {}
+                except Exception:  # noqa: BLE001
+                    payload = {"hits": [f"parse_error: {result}"], "missing": []}
+                seen[page_id] = payload
+                for item in payload.get("hits") or []:
+                    hits.append(f"{page_id}/{item}")
+                for key in payload.get("missing") or []:
+                    missing.add(str(key))
+                QTimer.singleShot(260, lambda: step(i + 1))
+
+            def grab(page_id: str = page_id) -> None:
+                if page_id == "raw":
+                    # 「原始输出」页的文本 3s 才刷一次，多等一会儿再扫
+                    QTimer.singleShot(2600, lambda: view.page().runJavaScript(CJK_SCAN_JS, 0, collect))
+                    return
+                view.page().runJavaScript(CJK_SCAN_JS, 0, collect)
+
+            # 页面进场要现场算一次表格（1 Hz 节流），等它画出来再扫
+            QTimer.singleShot(1700, grab)
+
+        step(0)
+
     def switch_lang(next_id: str) -> None:
         view.page().runJavaScript("I18N.setLang('en')")
 
@@ -1435,7 +1649,8 @@ def run_selftest(app: QApplication, view: QWebEngineView, window: HostWindow, ar
             i18n["shot"] = shot("en-spectrum")
             report["i18n"] = i18n
             steps.append(f"语言切换：{i18n.get('lang')} / {i18n.get('navLabels')}")
-            QTimer.singleShot(300, lambda: stage(next_id))
+            # 切完英文顺手把「零中文」验一遍（逐页扫 DOM + 查 en 词典缺 key）
+            QTimer.singleShot(300, lambda: en_cjk_test(lambda: stage(next_id)))
 
         QTimer.singleShot(700, probe_lang)
 
@@ -1446,6 +1661,10 @@ def run_selftest(app: QApplication, view: QWebEngineView, window: HostWindow, ar
             if time.time() - started["load"] > 20:
                 return fail("页面 20s 未加载完成")
             QTimer.singleShot(200, start_after_load)
+            return
+        if not started.get("lang_reset"):
+            started["lang_reset"] = True
+            view.page().runJavaScript(LANG_RESET_JS, 0, lambda _r: start_after_load())
             return
         steps.append("页面已加载")
         result = window.start_run(
@@ -1461,6 +1680,7 @@ def run_selftest(app: QApplication, view: QWebEngineView, window: HostWindow, ar
                     "gain_target": args.gain_target,
                     "bins_out": 256,
                     "lang": args.lang,
+                    "engine": args.engine,
                 }
             )
         )
@@ -1471,7 +1691,7 @@ def run_selftest(app: QApplication, view: QWebEngineView, window: HostWindow, ar
 
     started["load"] = time.time()
     QTimer.singleShot(200, start_after_load)
-    QTimer.singleShot(int(args.seconds * 1000) + 40000, lambda: fail("自检超时"))
+    QTimer.singleShot(int(args.seconds * 1000) + 80000, lambda: fail("自检超时"))
     app.exec()
     print("[selftest] steps: " + " | ".join(steps), flush=True)
     window.shutdown()

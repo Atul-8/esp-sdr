@@ -7,8 +7,13 @@
  *   · 页面注册表：registry.json 里给 title_en/hint_en，路由按当前语言取；
  *   · 语言变了会触发 window 上的 "langchange" 事件，页面自己重画动态部分。
  *
- * 约定：模块（modes/）自己产出的表格/ASCII 沿用模块语言（和 CLI 一致），
- * 不在这里翻——界面只翻「外壳 + 结构化数据」。
+ * 约定：模块（modes/）自己产出的表格/ASCII 沿用模块语言（和 CLI 一致），不在这里翻——
+ * 界面只翻「外壳 + 结构化数据」。英文界面下模块那份中文**在 Python 侧就被换成英文了**
+ * （见 host/l10n.py：所有下行 payload 统一过 localize()），所以这里不需要（也不应该）
+ * 去翻模块正文。
+ *
+ * 英文模式**绝不退回中文**：缺 key 时返回 key 本身并记进 missing()，自检会把
+ * 「英文界面里还剩中文」和「en 词典缺 key」都当失败。
  */
 window.I18N = (function () {
   const STORAGE_KEY = "espsdr.lang";
@@ -20,6 +25,7 @@ window.I18N = (function () {
       "app.subtitle": "ESP32-C5 射频监测 · 周期快照，非连续实时",
       "hdr.port": "串口",
       "hdr.gain": "增益档",
+      "hdr.gainTitle": "增益档（PHY 表索引，不是 dB）",
       "hdr.gainPlaceholder": "AGC",
       "hdr.mock": "假固件",
       "hdr.scenario": "场景",
@@ -60,6 +66,11 @@ window.I18N = (function () {
       "log.bridgeFailed": "桥调用失败：{error}",
       "log.stopFailed": "停止失败：{error}",
       "log.stopped": "已停止",
+      "router.loadFailed": "页面片段加载失败",
+      "cap.parseFailed": "解析失败",
+      "log.langSwitched": "界面语言已切换，历史日志已清空（旧日志是切换前语言的）。",
+      "log.noBackend": "桥未就绪（页面还没连上 Python）",
+      "log.noSlot": "Python 侧没有这个方法：{name}",
 
       "popout.hint": "双击任意面板可弹出预览；Esc 关闭",
       "popout.dblHint": "双击放大预览",
@@ -127,6 +138,7 @@ window.I18N = (function () {
       "wf.notes.title": "判读说明与边界",
       "wf.notes.rows": "当前画了 {rows} 行（共扫完 {sweeps} 轮）",
       "wf.notes.cover": "覆盖：{cover}",
+      "wf.notes.window": "窗",
       "wf.notes.code": "显示拉伸范围 功率码 {lo}..{hi}（只影响颜色，不改原始值）",
       "wf.notes.partial": "最新一轮还没扫满（缺 {missing} 窗）：缺的格子按「没扫到」画最暗色，不当成信号为 0",
       "wf.notes.png": "PNG/HTML 由 output/png.py 手写字节流 + 纯标准库渲染，中文一律落到 HTML",
@@ -183,6 +195,10 @@ window.I18N = (function () {
       "gain.up": "升一档",
       "gain.target": "目标",
       "gain.targetTitle": "自动模式的目标底噪参考码（功率码，不是 dBm）",
+      "gain.read": "档 {index} · 实测 {eff} · 底噪 {floor}",
+      "gain.codes": "{n} 码",
+      "gain.adjusts": "已调 {n} 次",
+      "gain.failed": "增益命令失败：{error}",
       "kv.gainFloor": "底噪 {code}",
       "kv.gainAuto": "自动调 {n} 次",
 
@@ -231,6 +247,12 @@ window.I18N = (function () {
       "ble.wifi.title": "2.4G 在用信道（重叠判读）",
       "ble.wifi.hint": "占用比例判「在用」，不用电平：窄带脉冲只占 2/18 ≈ 11%",
       "ble.wifi.none": "没有判定为「在用」的信道",
+      "ble.wifi.fill": "占空 {pct}",
+      "ble.wifi.excess": "比底噪 {db}",
+      "ble.wifi.cover": "覆盖 {mb}/{span} MHz",
+      "ble.wifi.conflict": "硬冲突 BLE {ch}",
+      "unit.codes": "{n} 码",
+      "unit.frames": "{n} 帧",
       "ble.waitData": "还没有数据：点顶部「开始」",
       "ble.sample": "{frames} 帧 / {span}s · 丢弃 {dropped} 帧 · 窗口 {windows} 个（{bw}MHz 窗 / {step}MHz 步进）",
       // ---- 抓拍页（capture.js）----
@@ -308,6 +330,23 @@ window.I18N = (function () {
       "cap.th.maxCaptures": "整轮抓档上限",
       "cap.th.samples": "每次抓多少样本（固件上限）",
       "cap.th.rate": "抓档采样率码",
+      "cap.why.alert_db": "判成信号的抬升下限",
+      "cap.why.narrow_alert_db": "窄段（< narrow_max_hz）要求更高",
+      "cap.why.narrow_max_hz": "窄段宽度上限",
+      "cap.why.busy_fill": "窗内抬起格占比上限（超了算环境饱和）",
+      "cap.why.min_span_s": "环形缓冲最少覆盖时长",
+      "cap.why.frame_min_gap_s": "帧抽稀间隔",
+      "cap.why.occ_excess_db": "算「占空」时的抬升口径",
+      "cap.why.hop_fill": "算「占空」时单帧抬起的比例",
+      "cap.why.steady_fill": "「持续」判据的占空下限",
+      "cap.why.min_frames": "最少连续帧数",
+      "cap.why.min_width_hz": "段宽度下限",
+      "cap.why.max_width_hz": "段宽度上限（整窗）",
+      "cap.why.retrigger_s": "同频点重复抑制窗口",
+      "cap.why.max_captures": "整轮抓档上限",
+      "cap.why.capture_samples": "每次抓多少样本（固件上限）",
+      "cap.why.capture_rate_code": "抓档采样率码",
+      "cap.filter.codes": "{n} 码",
       "cap.audit.title": "一键体检结论（只读当前已扫到的数据）",
       "cap.audit.run": "生成结论",
       "cap.audit.hint": "不重新跑扫描、不新抓档；要正式一分钟报告请跑 python -m app.audit",
@@ -327,12 +366,13 @@ window.I18N = (function () {
       "app.subtitle": "ESP32-C5 RF monitor · snapshot mode, not continuous",
       "hdr.port": "Port",
       "hdr.gain": "Gain idx",
+      "hdr.gainTitle": "gain index (PHY table entry, not dB)",
       "hdr.gainPlaceholder": "AGC",
       "hdr.mock": "Fake FW",
       "hdr.scenario": "Scenario",
       "hdr.start": "Start",
       "hdr.stop": "Stop",
-      "hdr.lang": "中文",
+      "hdr.lang": "中文(CN)",
       "hdr.langTitle": "Switch to Chinese",
       "status.idle": "Idle",
       "status.starting": "Connecting…",
@@ -367,6 +407,11 @@ window.I18N = (function () {
       "log.bridgeFailed": "Bridge call failed: {error}",
       "log.stopFailed": "Stop failed: {error}",
       "log.stopped": "Stopped",
+      "router.loadFailed": "Failed to load page fragment",
+      "cap.parseFailed": "Parse failed",
+      "log.langSwitched": "UI language changed — previous log lines were cleared (they were in the old language).",
+      "log.noBackend": "Bridge not ready (the page has not connected to Python yet)",
+      "log.noSlot": "Python has no such slot: {name}",
 
       "popout.hint": "Double-click any panel to pop it out; Esc closes",
       "popout.dblHint": "Double-click to pop out",
@@ -434,6 +479,7 @@ window.I18N = (function () {
       "wf.notes.title": "How to read it · limits",
       "wf.notes.rows": "showing {rows} rows ({sweeps} sweeps completed)",
       "wf.notes.cover": "coverage: {cover}",
+      "wf.notes.window": "windows",
       "wf.notes.code": "display stretch code {lo}..{hi} (colour only, raw values unchanged)",
       "wf.notes.partial": "the newest sweep is unfinished ({missing} windows missing); those cells stay darkest = never swept, not zero signal",
       "wf.notes.png": "PNG/HTML are hand-written byte streams from output/png.py (stdlib only); Chinese text lands in HTML",
@@ -490,6 +536,10 @@ window.I18N = (function () {
       "gain.up": "One step up",
       "gain.target": "Target",
       "gain.targetTitle": "Target noise-floor code for auto mode (relative dB code, not dBm)",
+      "gain.read": "Index {index} · measured {eff} · floor {floor}",
+      "gain.codes": "{n} codes",
+      "gain.adjusts": "{n} adjustments",
+      "gain.failed": "Gain command failed: {error}",
       "kv.gainFloor": "floor {code}",
       "kv.gainAuto": "auto-tuned {n}×",
 
@@ -538,6 +588,12 @@ window.I18N = (function () {
       "ble.wifi.title": "2.4G channels judged in use",
       "ble.wifi.hint": "fill ratio decides 'in use', not level: a narrowband pulse only fills 2/18 ≈ 11%",
       "ble.wifi.none": "no channel judged in use",
+      "ble.wifi.fill": "duty {pct}",
+      "ble.wifi.excess": "vs floor {db}",
+      "ble.wifi.cover": "covered {mb}/{span} MHz",
+      "ble.wifi.conflict": "hard conflict BLE {ch}",
+      "unit.codes": "{n} codes",
+      "unit.frames": "{n} frames",
       "ble.waitData": "No data yet — press Start",
       "ble.sample": "{frames} frames / {span}s · dropped {dropped} · {windows} windows ({bw} MHz wide / {step} MHz step)",
       // ---- capture page (capture.js) ----
@@ -615,6 +671,23 @@ window.I18N = (function () {
       "cap.th.maxCaptures": "captures per run",
       "cap.th.samples": "samples per capture (firmware cap)",
       "cap.th.rate": "capture sample-rate code",
+      "cap.why.alert_db": "minimum rise to count as a signal",
+      "cap.why.narrow_alert_db": "higher bar for narrow segments (< narrow_max_hz)",
+      "cap.why.narrow_max_hz": "narrow-segment width limit",
+      "cap.why.busy_fill": "raised-bin share limit (above = saturated)",
+      "cap.why.min_span_s": "minimum ring-buffer coverage",
+      "cap.why.frame_min_gap_s": "frame thinning interval",
+      "cap.why.occ_excess_db": "rise gate used when measuring duty",
+      "cap.why.hop_fill": "per-frame raised share used for duty",
+      "cap.why.steady_fill": "duty floor for \"sustained\"",
+      "cap.why.min_frames": "minimum consecutive frames",
+      "cap.why.min_width_hz": "segment width floor",
+      "cap.why.max_width_hz": "segment width ceiling (whole window)",
+      "cap.why.retrigger_s": "repeat-suppression window per frequency",
+      "cap.why.max_captures": "captures per run",
+      "cap.why.capture_samples": "samples per capture (firmware cap)",
+      "cap.why.capture_rate_code": "capture sample-rate code",
+      "cap.filter.codes": "{n} codes",
       "cap.audit.title": "One-click audit (read-only, uses what is already scanned)",
       "cap.audit.run": "Summarise",
       "cap.audit.hint": "No new sweep, no new capture; for the formal one-minute report run python -m app.audit",
@@ -641,10 +714,27 @@ window.I18N = (function () {
     return "zh";
   }
 
+  const missing = {};
+
+  function missingKeys() {
+    return Object.keys(missing);
+  }
+
+  function clearMissing() {
+    Object.keys(missing).forEach((key) => { delete missing[key]; });
+  }
+
   function t(key, params) {
     const table = DICT[lang] || DICT.zh;
     let text = table[key];
-    if (text === undefined) text = DICT.zh[key];
+    if (text === undefined) {
+      if (lang === "en") {
+        // 英文界面退回中文 = 静默漏中文，宁可把 key 亮出来让自检抓
+        missing[key] = true;
+        return key;
+      }
+      text = DICT.zh[key];
+    }
     if (text === undefined) return key;
     if (!params) return text;
     return text.replace(/\{(\w+)\}/g, (all, name) =>
@@ -653,7 +743,10 @@ window.I18N = (function () {
   }
 
   function level(levelName) {
-    return t("level." + levelName);
+    const key = "level." + levelName;
+    // 英文界面下模块给的 level 已经是英文（host/l10n.py 翻过了），词典不必再收一份
+    if (lang === "en" && !(DICT.en && DICT.en[key] !== undefined)) return String(levelName);
+    return t(key);
   }
 
   /** 把 root 子树里所有 [data-i18n] / [data-i18n-title] 填上当前语言 */
@@ -685,17 +778,19 @@ window.I18N = (function () {
     return lang;
   }
 
-  /** 页面注册表条目按当前语言取名（缺 *_en 时退回中文） */
+  /** 页面注册表条目按当前语言取名（英文模式下缺 *_en 也不退回中文，只报缺 key） */
   function entry(field, page) {
     if (lang === "en") {
       const key = field + "_en";
       if (page[key]) return page[key];
+      missing["registry." + (page.id || "?") + "." + key] = true;
+      return page.id || "";
     }
     return page[field] || "";
   }
 
   return {
-    t, apply, setLang, level, entry,
+    t, apply, setLang, level, entry, missingKeys, clearMissing,
     lang: () => lang,
     supported: SUPPORTED.slice(),
     dict: DICT,

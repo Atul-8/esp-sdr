@@ -89,6 +89,14 @@ class FakeFirmware:
         self.capture_requests = 0
         self.last_pairs: list[tuple[int, int]] = []
         self.last_payload: bytes = b""
+        #: 设备端自扫（FSM）状态：与真固件同语义
+        self.fsm_plan: list[tuple[int, int, int]] = []
+        self.fsm_running = False
+        self.fsm_bins = 512
+        self.fsm_rate = 2
+        self.fsm_detector = 0
+        self.fsm_cursor = 0
+        self.fsm_frames = 0
 
     # ---- pyserial 兼容层 -------------------------------------------------
     def write(self, data: bytes) -> int:
@@ -102,6 +110,8 @@ class FakeFirmware:
         return len(data)
 
     def read(self, size: int = 1) -> bytes:
+        if not self._buffer and self.fsm_running:
+            self._fsm_frame()  # 真固件是异步吐帧；假固件只能「主机来读就补一帧」
         if not self._buffer:
             return b""
         chunk = bytes(self._buffer[:size])
@@ -139,7 +149,7 @@ class FakeFirmware:
         elif head == "INFO":
             self._send("C5SDR 6 burst 16380\n")
         elif head == "CAPS":
-            self._send("CAPS SPEC SPECN SPECCAPS SPECSTAT TRANSPORT DCT LIMITS\n")
+            self._send("CAPS SPEC SPECN SPECCAPS SPECSTAT TRANSPORT DCT LIMITS FSM\n")
         elif head == "SPECINFO?":
             import json
 
@@ -160,6 +170,8 @@ class FakeFirmware:
             self._send("DC 1\n")
         elif head == "SPEC":
             self._spectrum(line)
+        elif line.startswith("FSM"):
+            self._fsm(line)
         elif head in ("CAP16", "CAP20"):
             self._capture(line)
         elif head == "VERSION?":
@@ -196,6 +208,74 @@ class FakeFirmware:
         self._send(
             f"SPECEND 0 0 {self.frames_per_scan * units} {bins * units * self.frames_per_scan}"
             f" 1000 0 0 {self.frames_per_scan} 0 0 {self.frames_per_scan * units} 0\n"
+        )
+
+    # ---- 设备端自扫（FSM）------------------------------------------------
+    # 与真固件同一套语义：FSMPLAN 存计划、FSM START 之后不等主机发命令就吐帧。
+    def _fsm(self, line: str) -> None:
+        fields = line.split()
+        head = fields[0]
+        if head == "FSMPLAN" and len(fields) >= 2:
+            if fields[1] == "CLR":
+                self.fsm_plan = []
+                self._send("OK\n")
+            elif fields[1] == "ADD":
+                if len(fields) < 4:
+                    self._send("ERR fsm_plan_args\n")
+                    return
+                module = int(fields[4]) if len(fields) > 4 else 0xFF
+                self.fsm_plan.append((int(fields[2]), int(fields[3]), module))
+                self._send("OK\n")
+            else:
+                self._send("ERR fsm_plan_args\n")
+            return
+        if line in ("FSMPLAN?", "FSM PLAN?"):
+            self._send(f"FSMPLAN {len(self.fsm_plan)}\n")
+            for index, (mhz, dwell, module) in enumerate(self.fsm_plan):
+                self._send(f"W {index} {mhz} {dwell} {module}\n")
+            self._send("FSMPLANEND\n")
+            return
+        if line == "FSM?":
+            state = "sweeping" if self.fsm_running else "idle"
+            self._send(f"FSM {state} {len(self.fsm_plan)} {self.fsm_cursor} 0 {self.fsm_frames} 0 0 0\n")
+            return
+        if line == "FSM STOP":
+            was = 1 if self.fsm_running else 0
+            self.fsm_running = False
+            self.fsm_cursor = 0
+            self._send(f"FSMEND {was}\n")
+            return
+        if head == "FSM" and len(fields) >= 2 and fields[1] == "START":
+            if len(fields) < 4:
+                self._send("ERR fsm_args\n")
+                return
+            if not self.fsm_plan:
+                self._send("ERR fsm_no_plan\n")
+                return
+            self.fsm_bins, self.fsm_rate = int(fields[2]), int(fields[3])
+            self.fsm_detector = int(fields[4]) if len(fields) > 4 else 0
+            self.fsm_running = True
+            self.fsm_cursor = 0
+            self.fsm_frames = 0
+            self._send(f"FSM START {len(self.fsm_plan)} {self.fsm_bins} {self.fsm_rate} {self.fsm_detector}\n")
+            return
+        self._send("ERR fsm_args\n")
+
+    def _fsm_frame(self) -> None:
+        """按计划补一帧自扫输出（头行 + SPC1），字节布局与真固件一致。"""
+        mhz, _dwell, _module = self.fsm_plan[self.fsm_cursor % len(self.fsm_plan)]
+        self.frequency_mhz = mhz
+        self.fsm_cursor += 1
+        self.fsm_frames += 1
+        fs = RATE_HZ.get(self.fsm_rate, 20_000_000)
+        codes = self.synth.codes(mhz * 1_000_000, fs, self.fsm_bins, jitter=True)
+        self._send(f"SPEC {self.fsm_bins} {fs} {self.fsm_bins} {mhz}\n")
+        self._buffer += encode_spectrum_frame(
+            codes,
+            seq=self.fsm_frames,
+            sample_index=self.fsm_frames * self.fsm_bins,
+            units=self.fsm_bins,
+            detector=self.fsm_detector,
         )
 
     def _capture(self, line: str) -> None:

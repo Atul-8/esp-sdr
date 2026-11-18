@@ -374,7 +374,7 @@ window.Pages.waterfall = (function () {
     const notes = root && root.querySelector("#wf-notes");
     if (!notes || !last) return;
     notes.innerHTML = "";
-    const cover = (last.cover || []).map((c) => c.label + " " + c.windows + " 窗").join(" / ");
+    const cover = (last.cover || []).map((c) => c.label + " " + c.windows + " " + T("wf.notes.window")).join(" / ");
     const lines = [
       T("wf.notes.rows", { rows: last.rows || 0, sweeps: last.sweeps || 0 }),
       T("wf.notes.cover", { cover: cover }),

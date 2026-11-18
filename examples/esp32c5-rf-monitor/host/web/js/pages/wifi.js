@@ -145,7 +145,8 @@ window.Pages.wifi = (function () {
       return;
     }
     value.textContent = "ch" + channel;
-    value.className = "card__value " + (target && target.level === "空闲" ? "good" : target && target.level === "轻度" ? "warn" : "bad");
+    const lk = target ? U.levelKey(target.level) : "unknown";
+    value.className = "card__value " + (lk === "idle" ? "good" : lk === "light" ? "warn" : "bad");
     note.textContent = target
       ? T("wifi.card.excess", { db: U.fmtDb(target.excess_db), level: U.levelText(target.level) })
       : T("wifi.card.wait");

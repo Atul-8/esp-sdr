@@ -88,3 +88,99 @@ SPC1 <28 B 头> <bins B 谱> <4 B CRC>        ← 与 SPEC 命令的帧同一个
    `FSM STOP`，做完再 `FSM START`。
 5. 目前 `repeats` 与 `module` 字段只是回显；模块归属由主机按频点自己判（主机手上有
    `info.plans`，不需要设备告诉它）。
+
+---
+
+## 主机侧怎么用（`engine=host` / `engine=device`）
+
+固件会自扫之后，主机这边就多了一个选择：**谁掐表**。两个引擎共用同一套模块、同一套判据、
+同一套下行 payload，区别只在「窗是谁驱动的」。
+
+### 一条配置切换
+
+`HostConfig.engine`（JSON 字段 `engine`，CLI `--engine`）取 `host`（默认）或 `device`：
+
+```python
+HostConfig.from_json(to_json({"port": "COM56", "engine": "device", "plan_dwell_ms": 20}))
+```
+
+```bash
+python app.py --port COM56 --engine device          # 设备自扫
+python app.py --port COM56 --engine host            # 主机逐窗（对照基线，老路径）
+python testing/sweep_real.py --engine device --seconds 30
+python testing/sweep_real.py --engine host  --mock --seconds 6   # 没板子也能验统计口径
+```
+
+设备不支持自扫（`CAPS` 里没有 `FSM`）时**自动退回 host**，并且把原因写进
+`engine_note`、原样报到界面上——不静默降级。
+
+### 两种引擎的口径差
+
+| | `engine=host` | `engine=device` |
+| --- | --- | --- |
+| 每窗开销 | `FREQ` + `SPEC` 两个往返 | 0 个往返（设备自己轮） |
+| 实测窗/秒 | **约 320**（本机逐窗驱动，模拟源） | **10.2**（bins=1024）/ **16.9**（bins=512）@60 ms 驻留 |
+| 串口占用 | 命令与帧交替，谁也堵不住谁 | **帧是瓶颈**：设备吐帧受串口带宽限制 |
+| 抓档 / 调增益 | 随时可插 | 必须 `FSM STOP` 让路（`SweepLinkFacade.pause_around`） |
+
+为什么设备自扫反而慢：射频时间没变，**串口把帧吐出来才是瓶颈**。`bins=1024` 时一帧约
+2.7 KB，20 MS/s 采样下串口吃满也就 10 窗/秒左右；降到 512 bin 才 16.9 窗/秒。所以
+`engine=device` 的价值不是「更快」，是「主机不在时也能扫」以及「命令往来不再挤在每窗里」。
+
+### `plan_dwell_ms`：设备计划表的节流阀
+
+固件按模块下发的计划表轮扫，每窗驻留取计划表里的 `dwell_ms`。主机的 `plan_dwell_ms`
+（默认 20）给这个值**封顶**：
+
+| 值 | 实测 |
+| --- | --- |
+| 60（模块原值） | 16.89 窗/秒（bins=512）——驻留被如实兑现 |
+| 20 | **30.72 窗/秒**（30 s 真板实测） |
+
+调小它不是「射频更快」，是把每窗实际采样时间压短、把更多时间让给轮扫；代价是单帧噪声
+变大。**默认 20 是标定过的折中**，改它要重跑一次 `sweep_real.py` 看 `frames_per_s` 和
+各模块表格行数有没有掉。
+
+### 后台排空线程（为什么要它）
+
+设备自扫时帧是「不请自来」的：`FSM START` 之后串口会一直吐 `SPEC` 头 + `SPC1` 帧。
+如果只在主机想取帧时才去读，串口缓冲会积压、然后一次性灌进来一大坨过期数据。所以
+`core/sweep_source.py` 起一个后台线程**持续排空**，按窗缓存最近一帧；主机的 `_fetch()`
+只是从缓存里取。
+
+由此带来两条语义，写清楚免得踩：
+
+1. **缓存里的「陈旧窗」照样可用**：设备本来一轮才回到某个频点，`stale_s` 之内的帧算
+   有效数据；`_fetch()` 取走也不弹出（下个模块可能还要同一个窗）。
+2. **`pace` 要诚实**：`SweepSource(pace=True)` 取到帧后补 `sleep(dwell_ms)`，因为设备
+   确实花了这段射频时间去采；`mock` 下 `pace=False`，否则跑测试要白等真实时间。
+
+另外 `FSM STOP` 之后串口里还压着已发出的帧，所以停止流程是「边排空边找 `FSMEND`」，
+不是发完命令就当停干净了。
+
+### 真板实测（COM56，`testing/sweep_real.py`）
+
+```
+$ python testing/sweep_real.py --seconds 30
+[engine] device — device sweep
+{ "seconds": 30.0, "frames": 301, "misses": 0, "distinct_mhz": 90,
+  "snapshots": 235, "frames_per_s": 9.75, ... }
+[OK]
+
+$ python testing/sweep_real.py --seconds 30 --plan-dwell 20
+{ "frames_per_s": 30.72, ... }          # 驻留封顶后窗/秒上来了
+```
+
+`frames` 是设备自扫的计数（`FSM?` 的 `frames` 字段）；`engine=host` 时没有设备自扫源，
+同一个报表改用**喂给模块的快照数**并标注 `frames_src: "host-snapshots"`——数字来自哪条
+口径一定写在报表里，不许两种口径混着比。
+
+### 回归口径
+
+- `python -m unittest discover -s tests -t .` —— 含 `tests/test_sweep_source.py`（9 条，假固件）
+- `cd host && python tests/test_sweep_session.py -v` —— 会话级（两引擎都跑）
+- `python app.py --selftest --seconds 10 --mock [--engine device]` —— 两条引擎都要 `ok:true`
+- `python testing/fsm_probe.py` —— 只有这一条碰真板（端口在脚本里固定 COM56）
+
+**验证范围说明**：上面的窗/秒数字是一块 C5 板 + 一条 USB 线的实测值，换板/换线/换 USB
+口会变；`engine=device` 的帧率是**串口带宽的函数**，不是固件能力的上限。

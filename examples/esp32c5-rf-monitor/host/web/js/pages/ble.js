@@ -15,17 +15,6 @@ window.Pages.ble = (function () {
   let lastPayload = null;
   let resizeTimer = null;
 
-  const RISK_STYLE = {
-    "无明显风险": "ok",
-    "轻微干扰": "light",
-    "蓝牙设备密度型": "heavy",
-    "WiFi 压制型": "heavy",
-    "混合型": "heavy",
-    "复杂噪音（多源混合）": "flat",
-    "宽带常开/形状疑似": "flat",
-    "无数据": "flat",
-  };
-
   function onEnter(host) {
     root = host;
     bars3d = new Three3D.ChannelBars(host.querySelector("#ble-3d"));
@@ -80,7 +69,7 @@ window.Pages.ble = (function () {
     // ---- 卡片 ----
     const risk = root.querySelector("#risk-type");
     risk.textContent = payload.risk_type || "—";
-    risk.dataset.risk = RISK_STYLE[payload.risk_type] || "flat";
+    risk.dataset.risk = U.riskClass(payload.risk_type);
     root.querySelector("#risk-note").textContent = T("ble.card.score", {
       score: (payload.score || 0).toFixed(1),
       level: U.levelText(payload.level || "空闲"),
@@ -94,7 +83,7 @@ window.Pages.ble = (function () {
 
     const contrast = payload.contrast_db;
     root.querySelector("#contrast").textContent =
-      (contrast === undefined || contrast === null ? "—" : Number(contrast).toFixed(1) + " 码");
+      (contrast === undefined || contrast === null ? "—" : T("unit.codes", { n: Number(contrast).toFixed(1) }));
     root.querySelector("#contrast-note").textContent = T("ble.card.contrastNote", {
       thr: (th.contrast_db !== undefined ? th.contrast_db : 8).toFixed(0),
     });
@@ -123,11 +112,11 @@ window.Pages.ble = (function () {
     const minFrames = th.min_adv_frames !== undefined ? th.min_adv_frames : 60;
     const rows = [
       [T("ble.ev.adv"), U.fmtPct(ev.adv_activity || 0, 0), (ev.adv_activity || 0) >= 0.10],
-      [T("ble.ev.shallow"), U.fmtPct(ev.shallow || 0, 0) + " / " + Math.round(ev.adv_frames || 0) + " 帧", (ev.shallow || 0) >= (th.light_ratio !== undefined ? th.light_ratio : 0.1) && (ev.adv_frames || 0) >= minFrames],
+      [T("ble.ev.shallow"), U.fmtPct(ev.shallow || 0, 0) + " / " + T("unit.frames", { n: Math.round(ev.adv_frames || 0) }), (ev.shallow || 0) >= (th.light_ratio !== undefined ? th.light_ratio : 0.1) && (ev.adv_frames || 0) >= minFrames],
       [T("ble.ev.wide"), U.fmtPct(ev.wideband || 0, 0), (ev.wideband || 0) >= (th.wideband_frac !== undefined ? th.wideband_frac : 0.5)],
-      [T("ble.ev.contrast", { thr: (th.contrast_db !== undefined ? th.contrast_db : 8).toFixed(0) }), Number(ev.contrast_db || 0).toFixed(1) + " 码", (ev.contrast_db || 0) >= (th.contrast_db !== undefined ? th.contrast_db : 8)],
+      [T("ble.ev.contrast", { thr: (th.contrast_db !== undefined ? th.contrast_db : 8).toFixed(0) }), T("unit.codes", { n: Number(ev.contrast_db || 0).toFixed(1) }), (ev.contrast_db || 0) >= (th.contrast_db !== undefined ? th.contrast_db : 8)],
       [T("ble.ev.flat"), String(Math.round(ev.slots_persistent || 0)), (ev.slots_persistent || 0) >= 1],
-      [T("ble.ev.rise"), Number(ev.rise_floor || 0).toFixed(1) + " 码", null],
+      [T("ble.ev.rise"), T("unit.codes", { n: Number(ev.rise_floor || 0).toFixed(1) }), null],
     ];
     rows.forEach((row) => {
       const tr = document.createElement("tr");
@@ -188,15 +177,15 @@ window.Pages.ble = (function () {
         const li = document.createElement("li");
         const parts = [
           "ch" + ch,
-          "占空 " + U.fmtPct(info.fill || 0, 0),
-          "比底噪 " + U.fmtDb(info.excess_db || 0),
-          "覆盖 " + (info.covered_mhz === undefined ? "—" : info.covered_mhz) + "/18 MHz",
+          T("ble.wifi.fill", { pct: U.fmtPct(info.fill || 0, 0) }),
+          T("ble.wifi.excess", { db: U.fmtDb(info.excess_db || 0) }),
+          T("ble.wifi.cover", { mb: info.covered_mhz === undefined ? "—" : info.covered_mhz, span: 18 }),
         ];
         // 20 MHz WiFi 完全盖住某个广播信道 = 共存硬冲突，单独标出来
         const hits = (payload.overlap || []).filter(
           (o) => o.wifi_channel === ch && o.wifi_busy && (o.fraction || 0) >= 0.9
         );
-        if (hits.length) parts.push("硬冲突 BLE " + hits.map((o) => o.ble_channel).join("/"));
+        if (hits.length) parts.push(T("ble.wifi.conflict", { ch: hits.map((o) => o.ble_channel).join("/") }));
         li.textContent = parts.join(" · ");
         wifi.appendChild(li);
       });

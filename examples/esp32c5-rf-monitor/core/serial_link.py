@@ -141,6 +141,7 @@ class EspSdrLink:
         self._port: Any = None
         self.identity = ""
         self.caps: list[str] = []
+        self._sweep_rate_code = 2  #: 自扫用的采样率码（start_sweep 时更新）
         self.spec_caps: dict[str, Any] = {}
         self.limits: dict[str, Any] = {}
         self.transport = ""
@@ -427,6 +428,124 @@ class EspSdrLink:
             duration_us=duration_us,
             freq_hz=(freq_hz or 0) // 1_000_000 * 1_000_000,
         )
+
+    # ---- 设备端自扫（FSM）------------------------------------------------
+    # 方案 A：调度搬进设备、判据留在主机。这里只包协议，不含任何判据。
+    # 帧格式与 ``scan()`` 完全相同（一行 SPEC 头 + 一帧 SPC1），所以解析器共用。
+    @property
+    def sweep_supported(self) -> bool:
+        """设备会不会自扫（``CAPS`` 里带 ``FSM``）。假固件与老固件没有。"""
+        return "FSM" in self.caps
+
+    def set_sweep_plan(self, windows: list[tuple[int, int, int]]) -> int:
+        """下发扫频计划：``[(freq_mhz, dwell_ms, module_index), ...]``。返回窗口数。"""
+        if not windows:
+            raise SerialLinkError("扫频计划不能为空")
+        self.command("FSMPLAN CLR")
+        for mhz, dwell_ms, module in windows:
+            self.command(f"FSMPLAN ADD {int(mhz)} {int(dwell_ms)} {int(module) & 0xFF}")
+        reply = self.command("FSMPLAN?").split()
+        if len(reply) != 2 or reply[0] != "FSMPLAN" or int(reply[1]) != len(windows):
+            raise SerialLinkError(f"FSMPLAN 回读不符：{reply} != {len(windows)}")
+        count = int(reply[1])
+        for _ in range(count):  # W 行必须读干净，否则会混进下一帧的同步里
+            self._readline()
+        if self._readline() != "FSMPLANEND":
+            raise SerialLinkError("FSMPLANEND 缺失")
+        return count
+
+    def start_sweep(
+        self, bins: int, rate_code: int, detector: int = 0, repeats: int = 0
+    ) -> str:
+        """开始自扫。``repeats=0`` = 一直转。返回 ``FSM START n bins rate det``。"""
+        self._sweep_rate_code = int(rate_code)
+        reply = self.command(f"FSM START {int(bins)} {int(rate_code)} {int(detector)} {int(repeats)}")
+        if not reply.startswith("FSM START"):
+            raise SerialLinkError(f"FSM START 回复异常：{reply!r}")
+        return reply
+
+    def stop_sweep(self, drain_s: float = 5.0) -> str:
+        """停止自扫并**排空在途帧**直到 ``FSMEND``（设备不会因为主机不读就丢帧）。"""
+        if self._port is None:
+            raise SerialLinkError("连接未打开")
+        self._write(b"FSM STOP\n")
+        deadline = time.monotonic() + drain_s
+        while time.monotonic() < deadline:
+            try:
+                magic = self._read_exact(4, deadline_s=max(0.05, deadline - time.monotonic()))
+            except SerialLinkError:
+                if self.failed:
+                    raise
+                continue
+            if magic == SPECTRUM_MAGIC:
+                # 头的第 26 字节是 log2(bins)；吃掉 magic 之后偏移 -4
+                head = self._read_exact(FRAME_HEADER_BYTES - 4, deadline_s=drain_s)
+                bins = 1 << head[22]
+                self._read_exact(bins + FRAME_TRAILER_BYTES, deadline_s=drain_s)
+                continue
+            text = (magic + self._readline_tail()).decode("ascii", "replace").strip()
+            if text.startswith("FSMEND"):
+                return text
+        raise SerialLinkError("FSM STOP 未收到 FSMEND（在途帧没排空）")
+
+    def _readline_tail(self) -> bytes:
+        """读完当前行剩下的字节（前面已经吃了 4 个）。"""
+        if self._port is None:
+            raise SerialLinkError("连接未打开")
+        return self._port.readline()
+
+    def read_sweep_frame(self, timeout_s: float = 2.0) -> Snapshot | None:
+        """读**一帧**自扫输出；没数据返回 None。
+
+        设备每窗先发一行 ``SPEC <bins> <fs> <bins> <mhz>`` 再发一帧 ``SPC1``，
+        这些都是 ``scan()`` 里那两种字节，所以解析器共用。
+        """
+        if self._port is None:
+            raise SerialLinkError("连接未打开")
+        deadline = time.monotonic() + max(0.05, timeout_s)
+        freq_mhz = 0
+        fs_hz = 0
+        while time.monotonic() < deadline:
+            try:
+                magic = self._read_exact(4, deadline_s=max(0.05, deadline - time.monotonic()))
+            except SerialLinkError:
+                if self.failed:
+                    raise
+                return None
+            if magic == b"SPEC":
+                # 头行格式与 SPEC 命令的启动回复相同：
+                # ``SPEC <fft_bins> <sample_rate_hz> <unit_pairs> <MHz>``
+                parts = (magic + self._readline_tail()).decode("ascii", "replace").split()
+                if len(parts) >= 5:
+                    freq_mhz = int(parts[4])
+                    fs_hz = int(parts[2])
+                continue
+            if magic != SPECTRUM_MAGIC:
+                text = (magic + self._readline_tail()).decode("ascii", "replace").strip()
+                if text.startswith("FSMEND"):
+                    return None
+                continue
+            # SPC1 头里自带 log2(bins)，所以即使头行丢了也还能解帧
+            head = self._read_exact(FRAME_HEADER_BYTES - 4, deadline_s=max(0.2, deadline - time.monotonic()))
+            bins = 1 << head[22]
+            rest = self._read_exact(bins + FRAME_TRAILER_BYTES, deadline_s=max(0.2, deadline - time.monotonic()))
+            try:
+                frame: SpectrumFrame = decode_spectrum_frame(magic + head + rest)
+            except SnapshotError as exc:
+                self.failed = True
+                raise SerialLinkError(f"频谱帧解析失败：{exc}") from exc
+            self._last_scan = {
+                "freq_hz": freq_mhz * 1_000_000,
+                "bins": bins,
+                "mode": "sweep",
+            }
+            return frame.to_snapshot(
+                ts=time.time(),
+                center_hz=freq_mhz * 1_000_000,
+                bw_hz=fs_hz or RATE_TABLE.get(self._sweep_rate_code, 0) or 20_000_000,
+                extra={"transport": self.transport, "engine": "device"},
+            )
+        return None
 
     # ---- 诊断 ------------------------------------------------------------
     def describe(self) -> dict[str, Any]:

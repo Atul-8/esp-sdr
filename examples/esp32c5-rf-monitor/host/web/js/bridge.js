@@ -24,8 +24,8 @@ window.Bridge = (function () {
   /** 调 Python 的 Slot：call("start", JSON.stringify(cfg)) → Promise<object> */
   function call(name, ...args) {
     return new Promise((resolve, reject) => {
-      if (!backend) return reject(new Error("backend 未就绪"));
-      if (typeof backend[name] !== "function") return reject(new Error("没有这个方法：" + name));
+      if (!backend) return reject(new Error(T("log.noBackend")));
+      if (typeof backend[name] !== "function") return reject(new Error(T("log.noSlot", { name: name })));
       backend[name](...args, (result) => {
         if (typeof result === "string") {
           try { return resolve(JSON.parse(result)); } catch (e) { return resolve(result); }
@@ -37,7 +37,7 @@ window.Bridge = (function () {
 
   function init(cb) {
     if (typeof qt === "undefined" || !qt.webChannelTransport) {
-      dispatch("log", { level: "err", text: "没有 QWebChannel（页面不是被上位机打开？）" });
+      dispatch("log", { level: "err", text: T("log.noChannel") });
       return;
     }
     new QWebChannel(qt.webChannelTransport, (channel) => {

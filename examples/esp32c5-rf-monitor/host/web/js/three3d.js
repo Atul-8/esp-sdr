@@ -61,7 +61,7 @@ window.Three3D = (function () {
       this.heights = new Float32Array(this.nFreq * this.nTime);
 
       if (!hasThree) {
-        container.innerHTML = '<div class="muted">three.js 没加载（检查 web/assets/vendor/three.min.js）</div>';
+        container.innerHTML = '<div class="muted">' + T("spectrum.noThree") + "</div>";
         this.ok = false;
         return;
       }
@@ -170,7 +170,7 @@ window.Three3D = (function () {
       this.frames = 0;
       this.bars = [];
       if (!hasThree) {
-        container.innerHTML = '<div class="muted">three.js 没加载</div>';
+        container.innerHTML = '<div class="muted">' + T("spectrum.noThree") + "</div>";
         this.ok = false;
         return;
       }
@@ -223,7 +223,7 @@ window.Three3D = (function () {
         bar.material.dispose();
       }
       this.bars = [];
-      const list = (channels || []).filter((c) => c.level !== "无覆盖");
+      const list = (channels || []).filter((c) => U.levelKey(c.level) !== "none");
       if (!list.length) return;
       const peak = Math.max.apply(null, list.map((c) => Math.max(0, c.excess_db)).concat([1]));
       const span = 4.2;

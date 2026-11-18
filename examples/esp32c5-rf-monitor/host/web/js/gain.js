@@ -53,7 +53,7 @@ window.Gain = (function () {
       const next = await Bridge.call("gainControl", JSON.stringify(payload));
       if (next && next.kind === "gain") apply(next);
     } catch (err) {
-      if (window.AppLog) AppLog({ level: "err", text: "增益命令失败：" + err });
+      if (window.AppLog) AppLog({ level: "err", text: T("gain.failed", { error: err }) });
     }
   }
 
@@ -95,10 +95,10 @@ window.Gain = (function () {
     const eff = state.effective === null || state.effective === undefined ? "—" : state.effective;
     const floor = state.floor_code === null || state.floor_code === undefined
       ? "—"
-      : Number(state.floor_code).toFixed(1) + " 码";
+      : T("gain.codes", { n: Number(state.floor_code).toFixed(1) });
     const read = $("#gain-read");
     if (read) {
-      read.textContent = "档 " + state.index + " · 实测 " + eff + " · 底噪 " + floor;
+      read.textContent = T("gain.read", { index: state.index, eff: eff, floor: floor });
       read.title = state.note || "";
       read.dataset.mode = state.mode;
     }
@@ -106,7 +106,7 @@ window.Gain = (function () {
     if (note) {
       const parts = [];
       if (state.note) parts.push(state.note);
-      if (state.mode === "AUTO" && state.adjusts) parts.push("已调 " + state.adjusts + " 次");
+      if (state.mode === "AUTO" && state.adjusts) parts.push(T("gain.adjusts", { n: state.adjusts }));
       note.textContent = parts.join(" · ");
     }
   }

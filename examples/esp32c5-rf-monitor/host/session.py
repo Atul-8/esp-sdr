@@ -18,6 +18,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
+import l10n  # 本地模块：下行本地化（英文界面下模块判词/表格也必须是英文）
 import paths  # 本地模块：定位分析层（core/ modes/ output/ tests/）
 from gain import MODES as GAIN_MODES, GainAwareSource, GainControl, parse_gain_line  # noqa: E402
 
@@ -28,6 +29,7 @@ from core.registry import Output, Registry, discover  # noqa: E402 - 必须先 e
 from core.scheduler import Scheduler, SchedulerStats  # noqa: E402
 from core.serial_link import EspSdrLink  # noqa: E402
 from core.snapshot import Snapshot  # noqa: E402
+from core.sweep_source import SweepLinkFacade, SweepSource, sweep_key  # noqa: E402
 from tests.fake_firmware import FakeFirmware  # noqa: E402
 from tests.mock_modes import ProbePlugin  # noqa: E402
 from tests.mock_source import SCENARIOS  # noqa: E402
@@ -38,6 +40,9 @@ from app.capture_link import (  # noqa: E402
     profile_for,
     synthetic_capture,
 )
+
+#: 采集引擎：host = 主机逐窗驱动；device = 设备自扫（方案 A，调度搬进固件）
+ENGINES = ("host", "device")
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_DIR = os.path.join(SRC_DIR, ".data")
@@ -63,6 +68,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "thread_error": "[线程异常] {error}",
         "already_running_log": "[打开失败] {message}",
         "gain_no_session": "还没开始采集：点「开始」后再调增益",
+        "audit_failed": "体检失败",
     },
     "en": {
         "probe_only": "No functional module in modes/ yet — using the link probe to verify the board",
@@ -79,6 +85,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "thread_error": "[Thread error] {error}",
         "already_running_log": "[Open failed] {message}",
         "gain_no_session": "Not collecting yet — press Start before changing gain",
+        "audit_failed": "Audit failed",
     },
 }
 
@@ -159,6 +166,10 @@ CONFIG_FIELDS: dict[str, tuple[type, bool]] = {
     "bins_out": (int, False),
     "store_path": (str, False),
     "lang": (str, False),
+    #: 采集引擎：host = 主机逐窗驱动（默认）；device = 设备自扫（方案 A）
+    "engine": (str, False),
+    #: 设备自扫时计划表里每个窗的驻留上限（ms）—— device 引擎的节流阀
+    "plan_dwell_ms": (int, False),
 }
 
 
@@ -178,6 +189,13 @@ class HostConfig:
     bins_out: int = DEFAULT_BINS_OUT
     store_path: str = ""  # 空 = 不入库
     lang: str = "zh"  # 界面语言（zh/en），只影响 Python 侧发给界面的那几条文案
+    #: 采集引擎。``host`` = 主机逐窗发 FREQ/SPEC；``device`` = 设备自扫（方案 A）。
+    #: 设备不会自扫时自动退回 host，并在 ``describe()`` 里如实回报。
+    engine: str = "host"
+    #: 设备自扫的每窗驻留上限（ms）。真板实测：固件一次 SPEC 是 ~1 ms 突发，
+    #: 模块声明的 100 ms 在逐窗驱动下从没花过；设备自扫是真 paced 的，
+    #: 照抄 100 ms 会把自扫压到 10 窗/秒（标定见 docs/07-fsm.md）。
+    plan_dwell_ms: int = 20
 
     @classmethod
     def from_json(cls, text: str) -> "HostConfig":
@@ -209,6 +227,9 @@ class HostConfig:
             cfg.gain_mode = cfg.gain_mode.upper()
         if cfg.scenario not in SCENARIOS:
             raise ValueError(f"未知场景：{cfg.scenario}（可选 {', '.join(sorted(SCENARIOS))}）")
+        cfg.engine = (cfg.engine or "host").lower()
+        if cfg.engine not in ENGINES:
+            raise ValueError(f"未知采集引擎：{cfg.engine}（可选 {'/'.join(ENGINES)}）")
         return cfg
 
     def validate(self) -> None:
@@ -243,6 +264,11 @@ class HostSession:
     capture_plugins: list[Any] = field(init=False, default_factory=list)
     capture_dir: str = field(init=False, default="")
     capture_log: list[str] = field(init=False, default_factory=list)
+    #: 采集引擎与自扫源（方案 A）。永远是普通属性，不靠 ``open()`` 建：
+    #: 未打开就 ``close()`` 也不能炸（单测会这么调）。
+    sweep: Any = field(init=False, default=None, repr=False)
+    engine: str = field(init=False, default="host")
+    engine_note: str = field(init=False, default="")
 
     def __post_init__(self) -> None:
         self.registry, self.notes = build_registry()
@@ -250,6 +276,18 @@ class HostSession:
     @property
     def lang(self) -> str:
         return (self.config.lang if self.config else "zh") or "zh"
+
+    def set_lang(self, lang: str) -> str:
+        """切界面语言（只影响下行文案，不改判据）。
+
+        界面里的语言开关会通过 ``Bridge.setLang`` 调到这里：日志/状态/表格之后都按新语言出。
+        """
+        lang = (lang or "zh").lower()
+        if lang not in LANGS:
+            lang = "zh"
+        if self.config is not None:
+            self.config.lang = lang
+        return lang
 
     # ---- 启停 ------------------------------------------------------------
     def open(self, config: HostConfig) -> dict[str, Any]:
@@ -290,9 +328,25 @@ class HostSession:
 
             self.store = Store(config.store_path)
         self.last_run_stats = None
+        # 采集引擎：默认主机逐窗；engine=device 且设备会自扫时换成订阅模式（见 core/sweep_source.py）
+        self.sweep: Any = None
+        self.engine = "host"
+        self.engine_note = ""
+        ops_link: Any = self.link
+        if (config.engine or "host") == "device":
+            sweep = self._device_sweep()
+            if sweep is None:
+                self.engine_note = "设备不支持自扫（CAPS 里没有 FSM），已退回主机逐窗"
+            else:
+                self.sweep = sweep
+                ops_link = SweepLinkFacade(self.link, sweep)
+                self.engine = "device"
+                self.engine_note = "设备自扫：计划与换频在设备里，判据仍在主机"
         # 抓档（任务 5）：把「真抓」函数交给有 capture_fn 槽的模块，再包一层 Source
         # 让抓档只在两次扫描之间落地（跟增益同一条纪律，理由见 app/capture_link.py）。
-        source: Any = GainAwareSource(self.link, self.gain)
+        source: Any = GainAwareSource(ops_link, self.gain)
+        # 抓档也走同一个门面：自扫期间要先停下来把射频让出来
+        self._capture_link = ops_link
         self.capture_plugins = iter_capture_plugins(self.registry)
         self.capture_dir = ""
         if self.capture_plugins:
@@ -322,6 +376,13 @@ class HostSession:
         return self.describe()
 
     def close(self) -> None:
+        # 自扫先停：别让设备在链路关掉之后还在往串口吐帧
+        if self.sweep is not None:
+            try:
+                self.sweep.stop()
+            except Exception:  # noqa: BLE001
+                pass
+            self.sweep = None
         if self.link is not None:
             try:
                 if not (self.config and self.config.mock):
@@ -344,17 +405,29 @@ class HostSession:
     # ---- 抓档 ------------------------------------------------------------
     def _link_capture(self, freq_hz: int, samples: int, rate_code: int, bits: int) -> Any:
         """真机抓档：把模块给的 ``(freq, samples, rate, bits)`` 转成 ``link.capture_iq`` 的参数顺序。"""
-        if self.link is None:
+        link = getattr(self, "_capture_link", None) or self.link
+        if link is None:
             raise RuntimeError("链路已关闭")
-        return self.link.capture_iq(samples=samples, rate_code=rate_code, bits=bits, freq_hz=freq_hz)
+        return link.capture_iq(samples=samples, rate_code=rate_code, bits=bits, freq_hz=freq_hz)
 
     def _log_capture(self, message: str) -> None:
         self.capture_log.append(message)
         del self.capture_log[: max(0, len(self.capture_log) - 40)]
 
+    def _out(self, payload: Any) -> Any:
+        """下行出口：``lang == "en"`` 时把 payload 里的中文串翻成英文。
+
+        只翻发往界面的那份（模块自己的 ASCII/终端输出保持中文）；中文界面原样返回，
+        零额外开销。翻不动的串原样留着 —— ``tests/test_l10n.py`` 会盯住「英文模式
+        下行 payload 零 CJK」，所以漏翻在测试里就会红，不会溜到界面上。
+        """
+        if self.lang == "zh":
+            return payload
+        return l10n.localize(payload)
+
     # ---- 增益 ------------------------------------------------------------
     def gain_state(self) -> dict[str, Any]:
-        return self.gain.state()
+        return self._out(self.gain.state())
 
     def gain_control(self, payload: str) -> dict[str, Any]:
         """顶栏增益控件 → 控制器。**只写意图**：真正的串口命令在两次扫描之间发。"""
@@ -367,16 +440,16 @@ class HostSession:
         action = str(req.get("action") or "").lower()
         try:
             if action == "mode":
-                return self.gain.request_mode(str(req.get("mode") or ""))
+                return self._out(self.gain.request_mode(str(req.get("mode") or "")))
             if action == "step":
-                return self.gain.request_step(int(req.get("delta") or 0))
+                return self._out(self.gain.request_step(int(req.get("delta") or 0)))
             if action == "index":
-                return self.gain.request_index(int(req.get("index") or 0))
+                return self._out(self.gain.request_index(int(req.get("index") or 0)))
             if action == "target":
-                return self.gain.request_target(float(req.get("target") or 0))
+                return self._out(self.gain.request_target(float(req.get("target") or 0)))
         except (TypeError, ValueError) as exc:
             return {"kind": "gain", "ok": False, "note": f"参数不合法：{exc}"}
-        return self.gain.state(message=f"未知操作：{action or '（空）'}")
+        return self._out(self.gain.state(message=f"未知操作：{action or '（空）'}"))
 
     # ---- 一键体检（只读当前状态） ----------------------------------------
     def audit(self) -> dict[str, Any]:
@@ -391,10 +464,10 @@ class HostSession:
         try:
             payload = summary(self.registry)
         except Exception as exc:  # noqa: BLE001 - 体检炸了不能让界面崩
-            return {"kind": "anti_peep_audit", "headline": "体检失败", "why": f"{type(exc).__name__}: {exc}", "sources": [], "captures": [], "boundaries": [], "ok": False}
+            return self._out({"kind": "anti_peep_audit", "headline": tr(self.lang, "audit_failed"), "why": f"{type(exc).__name__}: {exc}", "sources": [], "captures": [], "boundaries": [], "ok": False})
         payload["ok"] = True
         payload["dir"] = self.capture_dir
-        return payload
+        return self._out(payload)
 
     # ---- 驱动 ------------------------------------------------------------
     def _dispatch_snapshot(self, snap: Snapshot) -> None:
@@ -464,13 +537,13 @@ class HostSession:
             except Exception as exc:  # noqa: BLE001 - 单个模块炸了不能拖垮整个界面
                 item["error"] = f"{type(exc).__name__}: {exc}"
             plugins.append(item)
-        return {
+        return self._out({
             "kind": "tables",
             "ts": round(time.time(), 3),
             # 只算了哪几个模块（None → 全量）：自检据此验门控真的生效，不是「发了但没算」
             "modules": None if modules is None else [p.id for p in self.registry.plugins if p.id in wanted],
             "plugins": plugins,
-        }
+        })
 
     @staticmethod
     def table_json(output: Output | None) -> dict[str, Any] | None:
@@ -493,13 +566,106 @@ class HostSession:
         if stats is None:
             return {"kind": "stats", "plugins": [], "slices": 0, "snapshots": 0, "elapsed_s": 0.0}
         self.last_run_stats = stats
-        return {
+        return self._out({
             "kind": "stats",
             "uptime_s": round(time.time() - self.started_at, 1),
             # 增益读数跟着每秒的统计一起推：前端不用额外轮询，也不会算出「改了但没生效」
             "gain": self.gain.state(),
             **stats.as_dict(),
-        }
+        })
+
+    # ---- 设备自扫（方案 A） -----------------------------------------------
+    def _sweep_windows(
+        self, modules: Iterable[str] | None = None
+    ) -> tuple[list[tuple[int, int, int]], int, int]:
+        """把各模块的扫描计划合成一张设备计划表。
+
+        返回 ``(windows, bins, bw_hz)``：``windows`` 是 ``[(freq_mhz, dwell_ms, module_index)]``，
+        同一频点只留一个窗口（多个模块共用一个窗时设备只扫一次，帧被各自拿去用），
+        ``bins`` 取所有请求里最大的那个（设备一次只能用一档 FFT 点数），
+        ``bw_hz`` 取最大带宽（用于选采样率剖面）。
+        """
+        wanted = {m for m in modules or () if m}
+        windows: list[tuple[int, int, int]] = []
+        seen: set[int] = set()
+        bins = 256
+        bw_hz = 0
+        for index, plugin in enumerate(self.registry.plugins):
+            if wanted and plugin.id not in wanted:
+                continue
+            try:
+                requests = list(plugin.scan_requests())
+            except Exception:  # noqa: BLE001 - 单个模块计划失败不该拖死计划表
+                continue
+            for request in requests:
+                mhz = sweep_key(request.freq_hz)
+                if mhz in seen:
+                    continue
+                seen.add(mhz)
+                windows.append((mhz, max(1, int(request.dwell_ms)), index))
+                bins = max(bins, int(request.bins))
+                bw_hz = max(bw_hz, int(request.bw_hz))
+        return windows, bins, bw_hz
+
+    def _device_sweep(self, modules: Iterable[str] | None = None) -> SweepSource | None:
+        """建自扫源；设备不支持自扫或计划为空时返回 None（调用方退回主机逐窗）。"""
+        link = self.link
+        if link is None or not getattr(link, "sweep_supported", False):
+            return None
+        windows, bins, bw_hz = self._sweep_windows(modules)
+        if not windows:
+            return None
+        rate_code = 2
+        try:
+            _fs, rate_code, bins, _stride, _units, _cont = link.choose_profile(bw_hz or 20_000_000, bins)
+        except Exception:  # noqa: BLE001 - 剖面选不出来就用默认值，设备会自己校验
+            pass
+        return SweepSource(
+            link,
+            windows,
+            bins=bins,
+            rate_code=rate_code,
+            plan_dwell_ms=int(getattr(self.config, "plan_dwell_ms", 20) or 20),
+            # 真板要把"射频时间"补回来（权重按占空算）；假固件没有射频，补了只会让
+            # 自检跑得比 host 引擎还慢，所以 mock 下不补。
+            pace=not bool(self.config and self.config.mock),
+            logger=lambda message: self.notes.append(message),
+        )
+
+    def restrict_modules(self, modules: Iterable[str] | None) -> None:
+        """把设备计划收窄到指定模块（只扫这些模块的窗）。
+
+        **不要接到"换页"上**：真板实测（``--selftest --engine device``）一换页就要
+        ``FSM STOP`` + 重建计划，一次停表 + 一轮重扫，表格整段是"等待样本"；页切得
+        越勤饿得越狠。默认计划就取全体模块的并集（同频点合并），换页只门控"算不算
+        表格"，不动物理计划。这个方法留给"用户本来就只用一两个页"的场景手动调。
+        """
+        sweep = self.sweep
+        if sweep is None or self.link is None:
+            return
+        windows, bins, bw_hz = self._sweep_windows(modules)
+        if not windows:
+            return
+        rate_code = 2
+        try:
+            _fs, rate_code, bins, _stride, _units, _cont = self.link.choose_profile(bw_hz or 20_000_000, bins)
+        except Exception:  # noqa: BLE001
+            pass
+        if windows == sweep.windows and bins == sweep.bins:
+            return
+        was_running = sweep.running
+        sweep.stop()
+        sweep.windows = windows
+        sweep._keys = {key for key, _dwell, _mod in windows}
+        sweep.bins = bins
+        sweep.rate_code = rate_code
+        if was_running:
+            sweep.start()
+
+    def sweep_state(self) -> dict[str, Any]:
+        state = self.sweep.state() if self.sweep is not None else {}
+        state.update({"engine": self.engine, "note": self.engine_note})
+        return self._out(state)
 
     def _plugin_requests(self) -> list[tuple[Any, list[Any]]]:
         """(插件, 扫描请求列表)；没实现 scan_requests 的插件给空表。"""
@@ -529,6 +695,9 @@ class HostSession:
             "caps": [],
             "profiles": [],
             "notes": list(self.notes),
+            "engine": self.engine,
+            "engine_note": self.engine_note,
+            "sweep_supported": bool(self.link is not None and getattr(self.link, "sweep_supported", False)),
             "plugins": [
                 {
                     "id": p.id,
@@ -558,17 +727,47 @@ class HostSession:
                 info["notes"].append(
                     tr(self.lang, "read_link_failed", error=f"{type(exc).__name__}: {exc}")
                 )
-        return info
+        return self._out(info)
 
     def render_text(self) -> str:
-        """把当前产出渲染成 CLI 同款 ASCII（「原始输出」页用它做对照）。"""
+        """把当前产出渲染成 CLI 同款 ASCII（「原始输出」页用它做对照）。
+
+        英文界面下**不返回**模块自带的中文 ASCII（那些表头/注释是给人对着命令行看的，
+        逐行硬翻会把定宽对齐全打碎），而是把同一批数据渲成英文纯文本 —— 「原始输出」
+        页仍然能看到全部内容，界面上又不会漏出一个中文字。
+        """
+        if self.lang != "zh":
+            return self._render_text_en()
         blocks = []
         for plugin in self.registry.plugins:
             try:
                 blocks.append(plugin.produce().render())
             except Exception as exc:  # noqa: BLE001
                 blocks.append(f"[error] {plugin.id}: {type(exc).__name__}: {exc}")
-        return "\n\n".join(blocks) if blocks else "（没有模块产出）"
+        return "\n\n".join(blocks) if blocks else tr(self.lang, "no_output")
+
+    def _render_text_en(self) -> str:
+        """英文版纯文本：直接用已经本地化好的 :meth:`tables` 拼（零额外判据）。"""
+        payload = self.tables()
+        blocks: list[str] = []
+        for item in payload.get("plugins") or []:
+            table = item.get("table") or {}
+            title = table.get("title") or item.get("name") or item.get("id") or ""
+            lines = [f"[{item.get('id', '')}] {title}"]
+            columns = table.get("columns") or []
+            if columns:
+                lines.append(" | ".join(str(c) for c in columns))
+                lines.append("-" * min(72, max(8, sum(len(str(c)) + 3 for c in columns))))
+            for row in table.get("rows") or []:
+                lines.append(" | ".join("" if cell is None else str(cell) for cell in row))
+            for note in table.get("notes") or []:
+                lines.append(f"- {note}")
+            for name in table.get("files") or []:
+                lines.append(f"  file: {name}")
+            if item.get("error"):
+                lines.append(f"[error] {item['error']}")
+            blocks.append("\n".join(lines).rstrip())
+        return "\n\n".join(blocks) if blocks else tr(self.lang, "no_output")
 
 
 def _cell(value: Any) -> Any:

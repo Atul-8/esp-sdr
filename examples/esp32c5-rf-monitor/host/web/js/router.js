@@ -21,7 +21,7 @@ window.Router = (function () {
       xhr.onreadystatechange = () => {
         if (xhr.readyState !== 4) return;
         if (xhr.status === 200 || (xhr.status === 0 && xhr.responseText)) return resolve(xhr.responseText);
-        reject(new Error("加载失败：" + path + " (status " + xhr.status + ")"));
+        reject(new Error(T("router.loadFailed") + ": " + path + " (status " + xhr.status + ")"));
       };
       xhr.send();
     });
@@ -74,7 +74,7 @@ window.Router = (function () {
     try {
       html = await loadText("pages/" + pageId + "/page.html");
     } catch (err) {
-      html = '<div class="error-box">页面片段加载失败 / failed to load fragment: ' + String(err.message || err) + "</div>";
+      html = '<div class="error-box">' + T("router.loadFailed") + ": " + String(err.message || err) + "</div>";
     }
     host.innerHTML = html;
     host.scrollTop = 0;
@@ -89,6 +89,12 @@ window.Router = (function () {
       Popout.attach(host);
       Popout.afterPageChange(pageId);
     }
+    // 刚注入的片段（以及刚被搬回来的浮层面板）里都是静态中文，必须按当前语言重填一遍：
+    // 页面片段是现插的，启动时那一次 I18N.apply(document) 管不到它；
+    // 浮层是切页时从上一页摘下来再挂回去的，也不在那一次的作用域里。
+    // 放最后：这时候浮层已经挂回来了，一次就能覆盖两边。
+    if (window.I18N) I18N.apply(host);
+    if (window.Popout) Popout.refreshTitle();
     // 告诉 Python 侧「我现在停在这一页」：射频线程只算这一页要的模块
     // （前端不显示的页不该占 CPU、也不该抢射频时间片；见 host/app.py PAGE_MODULES）
     if (window.Bridge && Bridge.ready()) {
