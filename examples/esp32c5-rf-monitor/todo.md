@@ -18,6 +18,7 @@
 | 3 | `feat/3-ble-risk` | BLE 风险与环境评估 | `[TODO]` |
 | 4 | `feat/4-guard-58g` | 5.8G 频段守卫 | `[TODO]` |
 | 5 | `feat/5-capture` | 可疑信号抓拍（含分类器） | `[TODO]` |
+| T | `feat/host-gui` | 图形上位机（WebView，跨阶段工具，不占功能阶段） | `[REVIEW]` 待人类验收 |
 
 ---
 
@@ -138,6 +139,46 @@ BAND_5_HZ    = (5_170_000_000, 5_835_000_000)   # → 44 个窗：5180…5825，
 - 产出：按启发式分类（窄带连续/宽带突发/跳频样）触发 `CAP16`/`CAP20` 抓档，
   落盘原始 I/Q + 元数据 + 分类结论。
 - 判据：`unknown_cw` 场景触发抓档且分类为「窄带持续」；`quiet` 场景不抓。
+
+## [REVIEW] T. 图形上位机 / WebView（feat/host-gui）
+
+人类需求原文：「做一个测试上位机，参考 `MagicRobot_V0.1/host` 用 webview 3D 引擎，
+以后换别的实验只需要换网页」。
+
+交付物：
+
+- `host/app.py`：`QWebEngineView` + `QWebChannel` 桥（所有 Python→JS 信号都是 JSON 字符串）
+  + `QThread` 采集线程（频谱 20fps / 表格 1s / 单片 0.35s）
+- `host/session.py`：纯 Python 逻辑层（无 Qt）：`HostConfig` 校验、`HostSession`
+  `open/step/spectrum/tables/render_text`、`downsample_bins`（按桶取最大值，保窄带峰）
+- `host/web/`：`index.html` + 路由 + 三个页面（实时频谱 / WiFi 体检 / 原始输出）+
+  本地 three.js r128（离线可用）
+- `host/tests/test_session.py`：15 条无窗口自测
+- `host/README.md`：跑法、数据契约、**新增实验页的四步**、边界、踩坑表
+
+验收标准 → 结果：
+
+| 验收项 | 判据 | 结果 |
+| --- | --- | --- |
+| 逻辑层自测 | `python -m unittest discover -s host/tests -t .` 0 失败 | ✅ 15 passed |
+| 无人工自检（假固件） | `python host/app.py --selftest --seconds 8 --shot out.png` 退出码 0 | ✅ 退出码 0，7/7 checks |
+| 频谱页真的在画 | 收到帧 > 0 且 2D/3D 画布非黑比例 > 1% | ✅ 186 帧；spec 32.2% / 3D 5.9% / 2D 瀑布 83.9% |
+| WiFi 页真的在判 | 表格行 > 5、推荐信道有值、说明 ≥ 3 条 | ✅ 38 行；推荐 ch11 +17dB 拥挤；4 条说明 |
+| 原始页真的在输出 | 至少 1 个模块面板 + ASCII 文本 > 40 字符 | ✅ 1 面板 / 1 表 / 4365 字符 |
+| 换实验不改 Python | 新页面只加 `web/pages/<id>/page.html` + `registry.json` 一行 | ✅ 三页共用同一个 `app.py`，`router.js` 不认具体页名 |
+| 真板可跑 | `--selftest --real --port COM56 --gain-index 60` 退出码 0 | ✅ 207 帧 / 38 行 / 推荐 ch11 +4dB 空闲 |
+| 边界一致 | 界面上「功率码不是 dBm」「周期快照」「固定增益才可比」 | ✅ 纵轴/提示/说明页脚都写了 |
+
+未覆盖（必须诚实标注）：
+
+- **只在 Windows + Qt 6.12 上验过**；Linux/macOS 没测。
+- 3D 视图**没有自动对比度/色标校准**，只是同一色带映射；不做定量判读。
+- 页面刷新率受采集线程节流（20fps），**不是**固件原始帧率。
+
+遗留（可选优化）：
+
+- `wifi` 页每次表格刷新都重建 38 行 DOM（1 Hz，实测无卡顿）；若以后行数上千要改 diff 渲染。
+- 3D 柱状图每次刷新重建 mesh（≤38 个），切页时未复用；暂时够用。
 
 ## 阻塞与需求
 

@@ -340,6 +340,26 @@ class WifiCheck(ModePlugin):
             "span_s": round(self.span_s, 2),
         }
 
+    def web_payload(self) -> dict[str, Any]:
+        """给上位机（``host/web``）的结构化产出：表格由前端自己画，这里只给数。"""
+        data = self.channel_report()
+        data.update(
+            {
+                "kind": "wifi_check",
+                "avoided": {"2.4G": self.avoided("2.4G"), "5G": self.avoided("5G")},
+                "dropped_frames": self.dropped_frames,
+                "levels": [{"min_db": threshold, "label": label} for threshold, label in LEVELS],
+                "non_overlap_24": list(NON_OVERLAP_24),
+                "scan_plan": {
+                    "bw_hz": SCAN_BW_HZ,
+                    "step_hz": SCAN_STEP_HZ,
+                    "windows_24": len(sliding_windows(*BAND_24_HZ)),
+                    "windows_5": len(sliding_windows(*BAND_5_HZ)) if self.include_5g else 0,
+                },
+            }
+        )
+        return data
+
     def notes(self) -> list[str]:
         self.refresh()
         lines = [

@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>esp-sdr 测试上位机 · ESP32-C5 射频监测</title>
+  <link rel="stylesheet" href="css/app.css">
+  <!-- QWebChannel 的 JS 库（Qt 内置资源，不联网） -->
+  <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+  <!-- three.js 3D 引擎（本地 vendor，MIT） -->
+  <script src="assets/vendor/three.min.js"></script>
+  <script src="assets/vendor/OrbitControls.js"></script>
+</head>
+<body>
+<header class="top">
+  <div class="brand">ESP32-C5 射频监测<span class="brand-sub">测试上位机</span></div>
+
+  <div class="controls">
+    <label class="field">串口
+      <select id="port"><option value="">（读取中）</option></select>
+    </label>
+    <label class="field">增益档
+      <input id="gain" type="number" min="0" max="127" step="1" value="60" title="固定增益档位（PHY 表索引，不是 dB）。横向比信道必须固定增益。">
+    </label>
+    <label class="field check"><input type="checkbox" id="mock"> 假固件</label>
+    <label class="field">场景
+      <select id="scenario"></select>
+    </label>
+    <button id="btn-start" class="btn btn--primary">开始</button>
+    <button id="btn-stop" class="btn" disabled>停止</button>
+  </div>
+
+  <div class="status" id="status" data-state="idle">未连接</div>
+</header>
+
+<nav class="side" id="nav"></nav>
+
+<main id="page-container" class="page"></main>
+
+<footer class="foot">
+  <div class="kv" id="kv"></div>
+  <div class="log" id="log"></div>
+</footer>
+
+<script src="js/bridge.js"></script>
+<script src="js/util.js"></script>
+<script src="js/three3d.js"></script>
+<script src="js/router.js"></script>
+<script src="js/pages/spectrum.js"></script>
+<script src="js/pages/wifi.js"></script>
+<script src="js/pages/raw.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>

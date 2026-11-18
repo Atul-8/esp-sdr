@@ -22,6 +22,7 @@ examples/esp32c5-rf-monitor/
 ├── output/               # 输出基础件（表格/单位格式化），各功能再自带实现
 ├── tests/                # mock 快照源 + 假固件 + 43 条无硬件自测
 ├── app/                  # demo（mock 全链路）与 live（真机/假固件）
+├── host/                 # 图形上位机（PySide6 + WebView）：换实验只换网页
 ├── docs/                 # 阶段说明、任务书副本、验收记录
 └── todo.md               # 唯一任务事实源
 ```
@@ -38,6 +39,21 @@ python -m unittest discover -s tests -t . -v    # 全量自测
 ```
 
 `python -m app.demo --help` 有全部参数；产物落在 `.data/`（已被 gitignore）。
+
+## 图形上位机（WebView 版）
+
+除了命令行，还有一套**网页界面**的上位机（Python 只做串口/调度/打包 JSON，
+界面全在 `host/web/`，换实验只换网页不用改 Python）：
+
+```sh
+python host/app.py --mock --scenario wifi_busy          # 没板也能看
+python host/app.py --port COM56 --gain-index 60          # 真板
+python host/app.py --selftest --seconds 8 --shot out.png # 自动自检（退出码 0/2）
+```
+
+三个页面：实时频谱（2D 曲线 + 3D 瀑布 + 2D 瀑布）、WiFi 信道体检（排序表 +
+3D 柱状图 + 推荐）、原始输出（任意模块表格兜底 + CLI 同款 ASCII）。
+细节与「怎么加新实验页」见 `host/README.md`。
 
 ## 接真机
 
