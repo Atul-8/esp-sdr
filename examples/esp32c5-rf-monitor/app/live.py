@@ -94,6 +94,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"入库：{store.count()} 行 → {args.db}")
         if stats.source_errors:
             print(f"! 源错误 {stats.source_errors} 次：{stats.last_source_error}")
+        for plugin in registry.plugins:
+            try:
+                rendered = plugin.produce().render()
+            except Exception as exc:  # noqa: BLE001 - 产出失败不该掩盖调度结果
+                print(f"! {plugin.id} 产出失败：{type(exc).__name__}: {exc}")
+                continue
+            print()
+            print(rendered)
     except SerialLinkError as exc:
         print(f"!! 串口/协议错误：{exc}", file=sys.stderr)
         return 2

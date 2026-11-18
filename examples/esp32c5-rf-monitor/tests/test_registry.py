@@ -48,10 +48,23 @@ class RegistryTests(unittest.TestCase):
         with self.assertRaises(RegistryError):
             self.registry.register(object())  # type: ignore[arg-type]
 
-    def test_discover_empty_modes_is_allowed(self):
-        registry = discover("modes")
-        self.assertEqual(len(registry), 0)
-        self.assertEqual(registry.errors, [])
+    def test_discover_empty_package_is_allowed(self):
+        # 空目录不是错误：用临时空包验证，避免被真实 modes/ 的内容干扰。
+        import pathlib
+        import sys
+        import tempfile
+
+        tmp = tempfile.mkdtemp(prefix="c5mon-empty-")
+        pathlib.Path(tmp, "empty_modes").mkdir()
+        pathlib.Path(tmp, "empty_modes", "__init__.py").write_text("", encoding="utf-8")
+        sys.path.insert(0, tmp)
+        try:
+            registry = discover("empty_modes")
+            self.assertEqual(len(registry), 0)
+            self.assertEqual(registry.errors, [])
+        finally:
+            sys.path.remove(tmp)
+            sys.modules.pop("empty_modes", None)
 
     def test_discover_missing_package_reports_error(self):
         registry = discover("no_such_package")
@@ -61,7 +74,9 @@ class RegistryTests(unittest.TestCase):
     def test_discover_ignores_non_modes_modules(self):
         ProbePlugin(id="outside")
         registry = discover("modes")
-        self.assertEqual(len(registry), 0, "测试替身不该被自动注册")
+        ids = {p.id for p in registry.plugins}
+        self.assertNotIn("outside", ids, "测试替身不该被自动注册")
+        self.assertNotIn("probe", ids)
 
     def test_output_render(self):
         output = Output(
