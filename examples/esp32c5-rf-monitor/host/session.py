@@ -248,6 +248,7 @@ class HostSession:
             from core.store import Store
 
             self.store = Store(config.store_path)
+        self.last_run_stats = None
         self.scheduler = Scheduler(
             self.link, self.registry, store=self.store, on_snapshot=self._dispatch_snapshot
         )
@@ -288,7 +289,9 @@ class HostSession:
         if self.scheduler is None:
             return None
         self.on_snapshot_cb = on_snapshot
-        return self.scheduler.run(duration_s=seconds)
+        stats = self.scheduler.run(duration_s=seconds)
+        self.last_run_stats = stats  # 收尾统计（停线程后 stats() 还能拿到 share）
+        return stats
 
     # ---- 数据打包 --------------------------------------------------------
     def spectrum(self, snap: Snapshot, module_id: str = "") -> dict[str, Any]:
@@ -352,7 +355,11 @@ class HostSession:
     def stats(self, run_stats: SchedulerStats | None = None) -> dict[str, Any]:
         stats = run_stats if run_stats is not None else (self.scheduler.stats if self.scheduler else None)
         if stats is None:
+            # 线程停了 scheduler 就拆掉了；留档让"停之后"的查询（自检收尾、late window）还有数
+            stats = self.last_run_stats
+        if stats is None:
             return {"kind": "stats", "plugins": [], "slices": 0, "snapshots": 0, "elapsed_s": 0.0}
+        self.last_run_stats = stats
         return {"kind": "stats", "uptime_s": round(time.time() - self.started_at, 1), **stats.as_dict()}
 
     def _plugin_requests(self) -> list[tuple[Any, list[Any]]]:

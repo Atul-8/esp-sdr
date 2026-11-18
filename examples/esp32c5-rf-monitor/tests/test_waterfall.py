@@ -1,6 +1,7 @@
 """`modes/waterfall.py` + `app/waterfall.py` 的测试：轮扫计划、契约、CLI 端到端。"""
 from __future__ import annotations
 
+import base64
 import os
 import tempfile
 import unittest
@@ -14,6 +15,8 @@ from modes.waterfall import (
     DWELL_MS,
     SWEEP_BW_HZ,
     SWEEP_STEP_HZ,
+    WEB_COLS,
+    WEB_ROWS,
     WaterfallMonitor,
     sweep_plan,
     sweep_seconds,
@@ -146,6 +149,116 @@ class WaterfallMonitorTest(unittest.TestCase):
             for path in output.files:
                 self.assertTrue(Path(path).exists(), path)
             self.assertEqual(output.columns, ["页", "时长 s", "帧数", "色标码", "PNG"])
+
+    def test_produce_is_throttled_but_force_rerenders(self) -> None:
+        """上位机每秒都会 poll 一次 produce()，必须节流；点了「出图」按钮要能强制重渲。"""
+        monitor = WaterfallMonitor()
+        monitor.on_snapshot(
+            Snapshot(ts=1.0, center_hz=2_410 * MB, bw_hz=SWEEP_BW_HZ, bins_db=(30,) * BINS)
+        )
+        first = monitor.produce(force=True)
+        again = monitor.produce()
+        self.assertIs(again, first, "最小间隔内应该直接复用上一次的产物对象")
+        forced = monitor.produce(force=True)
+        self.assertIsNot(forced, first, "force=True 必须真的重渲")
+        monitor.reset()
+        self.assertIsNot(monitor.produce(force=True), forced, "reset() 之后缓存要清掉")
+
+
+class WebPayloadTest(unittest.TestCase):
+    """上位机「瀑布图」页的数据契约：一格一字节 + 一行 = 一轮完整轮扫。"""
+
+    def _feed(self, monitor: WaterfallMonitor, sweeps: int) -> None:
+        for index in range(sweeps):
+            for band, centers in sweep_plan():
+                for center in centers:
+                    level = 20 + (index * 3 + len(band.id)) % 9
+                    monitor.on_snapshot(
+                        Snapshot(
+                            ts=1_000.0 + monitor.frames * 0.1,
+                            center_hz=int(center),
+                            bw_hz=SWEEP_BW_HZ,
+                            bins_db=tuple(level for _ in range(BINS)),
+                        )
+                    )
+
+    def test_shape_and_encoding(self) -> None:
+        monitor = WaterfallMonitor(ring_frames=256)
+        self._feed(monitor, 2)
+        payload = monitor.web_payload()
+        self.assertEqual(payload["kind"], "waterfall")
+        self.assertEqual(payload["rows"], 2)
+        self.assertEqual(payload["cols"], WEB_COLS)
+        self.assertEqual(payload["sweeps"], 2)
+        self.assertEqual([band["id"] for band in payload["bands"]], ["24g", "5gl", "5gh"])
+        for band in payload["bands"]:
+            raw = base64.b64decode(band["cells"])
+            self.assertEqual(len(raw), payload["rows"] * payload["cols"], "一格必须正好一字节")
+            self.assertGreater(max(raw), 0, "扫过的格子不该全是 0 码（0 = 没扫到）")
+        # 时间轴：第一行是 0，往后递增
+        self.assertEqual(payload["row_ts"][0], 0.0)
+        self.assertEqual(payload["row_ts"], sorted(payload["row_ts"]))
+        self.assertIn("周期快照", payload["banner"])
+        # 两轮以上的时间戳差要能给出一个正数墙钟周期（单轮时为 0，前端退回射频时间）
+        self.assertGreater(payload["row_period_s"], 0.0)
+        self.assertAlmostEqual(payload["row_period_s"], 4.4, delta=0.2)
+        self.assertEqual([cover["windows"] for cover in payload["cover"]], [6, 13, 25])
+
+    def test_empty_payload_is_honest(self) -> None:
+        payload = WaterfallMonitor().web_payload()
+        self.assertEqual(payload["rows"], 0)
+        self.assertEqual(payload["sweeps"], 0)
+        for band in payload["bands"]:
+            self.assertEqual(base64.b64decode(band["cells"]), b"")
+        self.assertEqual(payload["row_ts"], [])
+
+    def test_ring_merges_frames_of_same_window(self) -> None:
+        """真板一次 scan 回 30+ 帧：环形缓冲必须按**窗**存，否则连一轮都装不下。"""
+        monitor = WaterfallMonitor(ring_frames=64)
+        for level in (30, 55, 41):
+            monitor.on_snapshot(
+                Snapshot(
+                    ts=1_000.0 + level * 0.001,
+                    center_hz=2_410 * MB,
+                    bw_hz=SWEEP_BW_HZ,
+                    bins_db=(level,) * BINS,
+                )
+            )
+        monitor.on_snapshot(
+            Snapshot(ts=1_010.0, center_hz=2_450 * MB, bw_hz=SWEEP_BW_HZ, bins_db=(20,) * BINS)
+        )
+        self.assertEqual(monitor.frames, 4, "frames 仍然数真帧，不能因为合并漏计")
+        self.assertEqual(len(monitor._ring), 2, "同窗连帧要合并成一条")
+        self.assertEqual(max(monitor._ring[0].bins_db), 55, "合并取最大保持（与热力图口径一致）")
+        self.assertEqual(monitor._ring[1].center_hz, 2_450 * MB, "换窗要新起一条")
+
+    def test_row_period_needs_two_complete_sweeps(self) -> None:
+        """只有一轮是扫满的，就别硬算周期（真板截断残轮会把周期算小到 1.8 s）。"""
+        monitor = WaterfallMonitor(ring_frames=256)  # 够装下这 1.5 轮，残的全在最后一轮
+        centers = [c for _band, rows in sweep_plan() for c in rows]
+        total = len(centers)
+        for index in range(total + total // 2):
+            monitor.on_snapshot(
+                Snapshot(
+                    ts=1_000.0 + index * 0.1,
+                    center_hz=int(centers[index % total]),
+                    bw_hz=SWEEP_BW_HZ,
+                    bins_db=(30,) * BINS,
+                )
+            )
+        payload = monitor.web_payload()
+        complete = [c for c in payload["row_frames"] if c >= payload["windows"]]
+        self.assertEqual(len(complete), 1, "这里只喂了 1.5 轮，扫满的只有 1 轮")
+        self.assertEqual(payload["row_period_s"], 0.0, "凑不齐两整轮就返回 0，让前端退回射频时间")
+
+    def test_row_limit_keeps_newest(self) -> None:
+        # 环形缓冲要够大：否则被裁掉的是「最旧的那几轮」，测不到 WEB_ROWS 这个行数上限
+        monitor = WaterfallMonitor(ring_frames=(WEB_ROWS + 4) * 64)
+        self._feed(monitor, WEB_ROWS + 3)
+        payload = monitor.web_payload()
+        self.assertEqual(payload["rows"], WEB_ROWS, "只画最近 WEB_ROWS 轮，别把 48 行画爆")
+        self.assertEqual(payload["sweeps"], WEB_ROWS + 3)
+        self.assertEqual(len(payload["bands"][0]["cells"]), len(payload["bands"][0]["cells"]))
 
 
 class PacedMockSourceTest(unittest.TestCase):

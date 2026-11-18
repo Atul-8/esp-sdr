@@ -22,13 +22,24 @@
 """
 from __future__ import annotations
 
+import base64
 import os
+import time
 from collections import deque
 from typing import Any, Sequence
 
 from core.registry import ModePlugin, Output, ScanRequest
 from core.snapshot import Snapshot
-from output.heatmap import BANDS, BANNER, Band, render_waterfall
+from output.heatmap import (
+    BANDS,
+    BANNER,
+    Band,
+    blank_grid,
+    code_range,
+    fill_row,
+    group_sweeps,
+    render_waterfall,
+)
 
 #: 单个扫描窗带宽（用户裁决：5G 宽窗改成窄窗多次扫、允许重叠）
 SWEEP_BW_HZ = 20_000_000
@@ -42,6 +53,14 @@ BINS = 512
 RING_FRAMES = 1200
 #: ``produce()`` 默认页时长（每页 5 分钟，一小时 12 页，可翻页看小时级历史）
 PAGE_SECONDS = 300.0
+#: 上位机「瀑布图」页最多画多少行（一行 = 一轮完整轮扫，不是固定时间桶）
+WEB_ROWS = 48
+#: 上位机每个频段的列数：三频段等宽并排，够看出窄带（BLE/CW）与宽带（微波炉），
+#: 又不至于把 QWebChannel 灌满（3 段 × 48 行 × 180 列 = 25920 字节，base64 后约 35 KB）
+WEB_COLS = 180
+#: 上位机每秒都会 poll 一次 ``produce()``；PNG 全量渲染有成本，限制最小间隔。
+#: CLI 只调一次，不受影响；要立刻出图用 ``produce(force=True)``。
+PRODUCE_MIN_INTERVAL_S = 15.0
 
 DEFAULT_OUT = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".data", "waterfall"
@@ -96,7 +115,7 @@ class WaterfallMonitor(ModePlugin):
 
     id = "waterfall"
     name = "周期性频谱瀑布图"
-    slice_weight = 0.8
+    slice_weight = 1.0  # 与 wifi_check 各占一半射频时间（单射频分时，诚实的一半速度）
 
     def __init__(
         self,
@@ -107,6 +126,8 @@ class WaterfallMonitor(ModePlugin):
         self.out_dir = out_dir or DEFAULT_OUT
         self.page_seconds = page_seconds
         self._ring: deque[Snapshot] = deque(maxlen=max(8, ring_frames))
+        self._last_output: Output | None = None
+        self._last_render_at = 0.0
         self.frames = 0
         self.sweeps = 0
         self.per_band_frames: dict[str, int] = {band.id: 0 for band in BANDS}
@@ -133,7 +154,6 @@ class WaterfallMonitor(ModePlugin):
         return requests
 
     def on_snapshot(self, snap: Snapshot) -> None:
-        self._ring.append(snap)
         self.frames += 1
         if self.first_ts is None:
             self.first_ts = snap.ts
@@ -142,8 +162,36 @@ class WaterfallMonitor(ModePlugin):
             if band.lo_hz <= snap.center_hz <= band.hi_hz:
                 self.per_band_frames[band.id] += 1
                 break
+        # 环形缓冲按**窗**存，同窗连帧最大保持合并。
+        # 真板一次 scan 能回 30+ 帧，若一帧一条，1200 帧连一轮（44 窗 × 37 帧 ≈ 1600）都装不下，
+        # 上位机就永远只画得出一行半（实测 rows=2 / 30 s）。
+        last = self._ring[-1] if self._ring else None
+        if last is not None and last.center_hz == snap.center_hz and len(last.bins_db) == len(snap.bins_db):
+            merged = [a if a >= b else b for a, b in zip(last.bins_db, snap.bins_db)]
+            self._ring[-1] = Snapshot(
+                ts=snap.ts,
+                center_hz=snap.center_hz,
+                bw_hz=snap.bw_hz,
+                bins_db=merged,
+                meta=dict(last.meta, **snap.meta),
+            )
+        else:
+            self._ring.append(snap)
 
-    def produce(self) -> Output:
+    def produce(self, force: bool = False) -> Output:
+        """渲染最近缓冲的时频热力图（PNG + HTML）。
+
+        上位机 ``HostSession.tables()`` 每秒都会调一次；这里做最小间隔节流，
+        避免每秒重渲一遍 PNG。CLI/报告要立刻出图就传 ``force=True``。
+        """
+        now = time.monotonic()
+        if (
+            not force
+            and self._last_output is not None
+            and (now - self._last_render_at) < PRODUCE_MIN_INTERVAL_S
+        ):
+            return self._last_output
+        self._last_render_at = now
         notes = [
             BANNER,
             f"缓冲 {len(self._ring)} 帧 / 累计 {self.frames} 帧，"
@@ -151,12 +199,13 @@ class WaterfallMonitor(ModePlugin):
             "功率码是相对 dB 码（0..255），不是 dBm；色标只表示相对强弱。",
         ]
         if not self._ring:
-            return Output(
+            self._last_output = Output(
                 kind="figure",
                 title="周期性频谱瀑布图",
                 notes=notes + ["还没有快照：先跑一轮扫描（app/waterfall.py --minutes N）"],
                 payload={"bands": [], "frames": 0, "pages": 0},
             )
+            return self._last_output
         result = render_waterfall(
             list(self._ring),
             self.out_dir,
@@ -172,7 +221,7 @@ class WaterfallMonitor(ModePlugin):
             ]
             for page in result.pages
         ]
-        return Output(
+        self._last_output = Output(
             kind="figure",
             title="周期性频谱瀑布图（时频热力图）",
             columns=["页", "时长 s", "帧数", "色标码", "PNG"],
@@ -188,8 +237,71 @@ class WaterfallMonitor(ModePlugin):
                 "files": result.files,
             },
         )
+        return self._last_output
 
     # ---- 供上位机 / 报告用 ------------------------------------------------
+    def web_payload(self) -> dict[str, Any]:
+        """给上位机「瀑布图」页的紧凑数据（**一行 = 一轮完整轮扫**）。
+
+        为什么发 base64 而不是 JSON 整数数组：功率码本来就是 0..255 的字节，
+        一格一字节即可无损传输；48×180×3 = 25920 字节 → base64 约 35 KB，
+        比 JSON 整数数组（约 100 KB+）小得多，1 Hz 推送才不会拖慢界面。
+
+        口径与 PNG 完全一致：同一套 ``output.heatmap`` 矩阵构建（同格多窗取最大保持，
+        0 码 = 这一格没扫到）；颜色映射由前端用 ``--code_lo/code_hi`` 拉伸，
+        不改判决、不碰 ``bins_db`` 原值。
+        """
+        snaps = list(self._ring)
+        sweeps = group_sweeps(snaps) if snaps else []
+        rows = sweeps[-WEB_ROWS:]
+        grids = {band.id: blank_grid(len(rows), WEB_COLS) for band in BANDS}
+        cache: dict[Any, Any] = {}
+        for index, sweep in enumerate(rows):
+            for snap in sweep:
+                fill_row(grids, BANDS, snap, index, cache)
+        lo, hi = code_range(grids) if rows else code_range({})
+        t0 = rows[0][0].ts if rows else 0.0
+        # 只用**扫满**的轮次估周期：环形缓冲最多留最近 RING_FRAMES 个窗，最老那一轮常被截断，
+        # 拿它算会把周期算小（实测真板 30 s 只剩 2 轮、首轮是残的 → 1.8 s < 射频 4.4 s）
+        stamps = [sweep[0].ts for sweep in rows if len(sweep) >= self._windows]
+        deltas = sorted(b - a for a, b in zip(stamps, stamps[1:]) if b > a)
+        # 多模块分时（上位机里 wifi_check 一起跑）会把整轮拉长，所以给前端一个**实测**墙钟周期
+        row_period_s = round(deltas[len(deltas) // 2], 2) if deltas else 0.0
+        bands: list[dict[str, Any]] = []
+        for band in BANDS:
+            raw = b"".join(bytes(row) for row in grids[band.id])
+            bands.append(
+                {
+                    "id": band.id,
+                    "label": band.label,
+                    "lo_mhz": round(band.lo_hz / 1e6, 1),
+                    "hi_mhz": round(band.hi_hz / 1e6, 1),
+                    "cells": base64.b64encode(raw).decode("ascii"),
+                }
+            )
+        return {
+            "kind": "waterfall",
+            "banner": BANNER,
+            "rows": len(rows),
+            "cols": WEB_COLS,
+            "sweeps": len(sweeps),
+            "frames": self.frames,
+            "ring_frames": len(snaps),
+            "windows": self._windows,
+            "sweep_s": round(sweep_seconds(), 2),
+            "row_period_s": row_period_s,
+            "dwell_ms": DWELL_MS,
+            "bw_mhz": round(SWEEP_BW_HZ / 1e6, 1),
+            "step_mhz": round(SWEEP_STEP_HZ / 1e6, 1),
+            "code_lo": lo,
+            "code_hi": hi,
+            "t0": round(t0, 3),
+            "row_ts": [round(sweep[0].ts - t0, 2) for sweep in rows],
+            "row_frames": [len(sweep) for sweep in rows],
+            "bands": bands,
+            "cover": self.band_summary(),
+        }
+
     def band_summary(self) -> list[dict[str, Any]]:
         """每个频段的覆盖情况（给上位机画图 / 给报告做表）。"""
         out: list[dict[str, Any]] = []
@@ -219,6 +331,8 @@ class WaterfallMonitor(ModePlugin):
 
     def reset(self) -> None:
         self._ring.clear()
+        self._last_output = None
+        self._last_render_at = 0.0
         self.frames = 0
         self.sweeps = 0
         self.per_band_frames = {band.id: 0 for band in BANDS}
@@ -230,9 +344,12 @@ __all__ = [
     "BINS",
     "DWELL_MS",
     "PAGE_SECONDS",
+    "PRODUCE_MIN_INTERVAL_S",
     "RING_FRAMES",
     "SWEEP_BW_HZ",
     "SWEEP_STEP_HZ",
+    "WEB_COLS",
+    "WEB_ROWS",
     "WaterfallMonitor",
     "sweep_plan",
     "sweep_seconds",

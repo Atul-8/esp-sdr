@@ -138,12 +138,30 @@ python -m app.waterfall --minutes 10 --scenario mixed \
    ↑2400      干净段（25 码）    ↑2430 亮块   ↑2450 微波炉宽带（均匀 ====）→ 2483.5
 ```
 
+## 5.1 上位机侧的两个坑（2026-11 实测修掉）
+
+真板跑 40 s 的自检里暴露了两个只有「多模块共享单射频 + 真机帧率」才会现形的问题：
+
+1. **环形缓冲必须按「窗」存，不能按「帧」**。真板一次 `scan()` 回 30+ 帧，
+   一帧一条的话默认 `RING_FRAMES=1200` 连一轮（44 窗 × ~37 帧 ≈ 1600 帧）都装不下，
+   上位机永远只画得出一行半（实测 30 s → `rows=2`）。现在 `on_snapshot()` 对**同中心频率的连帧
+   做最大保持合并**，缓冲粒度 = 窗 → 40 s 实测 `rows=5 / sweeps=5 / painted 100%`。
+   `frames` 仍然数真帧（13170），别拿它当缓冲长度。
+2. **`row_period_s` 只用「扫满」的轮次算**。环形缓冲截断最老那一轮时，残轮的时间戳会把
+   周期算小（实测真板算出 1.8 s < 射频 4.4 s，逻辑上不可能）。现在只有 `len(sweep) >= windows`
+   的轮次参与中位数；凑不齐两整轮就返回 `0.0`，前端退回射频时间。
+
+另外 `slice_weight` 两边都是 `1.0`（`waterfall` 与 `wifi_check` 各占一半射频时间）：
+原来是 0.8 vs 40.0，实测 share `{waterfall: 0.016, wifi_check: 0.984}`，
+瀑布一轮 4.4 s 的射频时间被拉成 5 分钟——「看起来没数据」其实是饿死，不是 bug。
+
 ## 6. 验证命令与结果
 
 ```bash
 # 全部自测（标准库 unittest，无第三方依赖）
 python -m unittest discover -s tests -t .
-# → Ran 82 tests in 5.7s / OK
+# → Ran 103 tests in 10.4s / OK      ← 本分支（含 feat/host-gui 合并）
+#   纯 feat/2-waterfall 时为 82 tests；差的是任务 1 的 wifi_check 与 host 层测试
 ```
 
 新增测试文件：
@@ -152,11 +170,11 @@ python -m unittest discover -s tests -t .
 | --- | --- | --- |
 | `tests/test_png.py` | PNG 结构（签名/IHDR/CRC/IEND）、像素回读、点阵文字、越界裁剪 | 10 |
 | `tests/test_heatmap.py` | 轮分组、最大保持、宽带宽度、分页、空态、ASCII、**PNG 像素 == 矩阵**、mock 判据 | 15 |
-| `tests/test_waterfall.py` | 窗序列（覆盖压边/步进 ≤15/必重叠）、44 窗、契约、环形缓冲、CLI 端到端 | 14 |
+| `tests/test_waterfall.py` | 窗序列（覆盖压边/步进 ≤15/必重叠）、44 窗、契约、环形缓冲（**按窗合并**）、CLI 端到端、**web_payload 编码**、produce 节流、**row_period 只用扫满的轮次** | 20 |
 
 | 验收项 | 判据 | 结果 |
 | --- | --- | --- |
-| 自测全绿 | `unittest` 0 失败 | ✅ 82 passed |
+| 自测全绿 | `unittest` 0 失败 | ✅ 103 passed（本分支） |
 | 轮扫覆盖 | 三频段首尾压边、步进 ≤ 15 MHz、相邻窗重叠 | ✅ 6/13/25 窗，max gap 12.7/15/15 |
 | 快照顺路入库 | 10 分钟 mock 入库帧数 == 生成帧数 | ✅ 5984 / 5984，错误 0 |
 | 从 SQLite 渲染 | `--render-only` 不重跑扫描也能出图 | ✅ 两页 PNG+HTML 重建通过 |
@@ -179,17 +197,22 @@ python -m unittest discover -s tests -t .
 5. **色标是相对码**：同一页内可比，跨页/跨场景不可比（每页各自归一）。
 6. **渲染性能**：720×69×3 频段的逐像素 Python 循环，一页约 0.3 s；小时级（12 页）约 4 s，
    可接受；若要做到 24 h 需要行级缓存或 numpy。
-7. **上位机还没加瀑布图页**：`host/` 在 `feat/host-gui` 分支上，本分支（`feat/2-waterfall`）
-   从阶段 0 切出，没有 `host/` 目录。要不要把 PNG/HTML 嵌进上位机，等人类定。
+7. **上位机页面已在 `feat/host-gui` 落地**：`host/web/pages/waterfall/`（注册表一行 + 片段 +`js/pages/waterfall.js`），
+   数据来自本模块的 `web_payload()`（`kind="waterfall"`，一行 = 一轮、一格一字节 base64、0 码 = 未扫到）。
+   本分支（`feat/2-waterfall`）没有 `host/` 目录，两分支合并后才看得到页面。
+8. **上位机上的窗口时间尺度很短**：GUI 只画环形缓冲里的最近记录（按窗存，默认 1200 窗 ≈ 27 轮 ≈ 5 分钟），
+   小时级历史仍要走 `app/waterfall.py` 读 SQLite；两边口径相同但不共用同一份数据。
 
 ## 8. 文件清单
 
 ```text
 examples/esp32c5-rf-monitor/
-├── modes/waterfall.py      # 轮扫计划 + 环形缓冲 + produce()
+├── modes/waterfall.py      # 轮扫计划 + 环形缓冲 + produce() + web_payload()
 ├── output/png.py           # 零依赖 PNG 编码器 + 5×7 点阵 + Canvas
 ├── output/heatmap.py       # 轮分组 / 矩阵 / 热力图 PNG / HTML 翻页 / ASCII 预演
 ├── app/waterfall.py        # CLI：mock → SQLite → PNG+HTML（含 --render-only / --ascii）
+├── host/web/pages/waterfall/page.html   # 上位机瀑布图页（仅 feat/host-gui 分支）
+├── host/web/js/pages/waterfall.js       # 同上：canvas 画三频段时频图 + 出图按钮
 ├── tests/test_png.py
 ├── tests/test_heatmap.py
 ├── tests/test_waterfall.py

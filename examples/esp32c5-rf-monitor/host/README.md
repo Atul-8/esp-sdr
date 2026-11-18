@@ -30,6 +30,7 @@ host/
     └── pages/
         ├── registry.json      # 页面注册表（换实验只动这里）
         ├── spectrum/page.html # 实时频谱：2D 曲线 + 3D 瀑布 + 2D 瀑布
+        ├── waterfall/page.html# 周期瀑布图：全频段时频热力图 + 出 PNG/HTML 按钮
         ├── wifi/page.html     # WiFi 信道体检：卡片 + 排序表 + 3D 柱状图
         └── raw/page.html      # 通用兜底：任何模块的 Output 表格 + CLI 同款 ASCII
 ```
@@ -45,10 +46,10 @@ python host/app.py --port COM56 --gain-index 60
 # 2) 没板也能看：假固件 + 内置场景
 python host/app.py --mock --scenario wifi_busy
 
-# 3) 无人工干预自检（跑 8s → 切三个页面截图 → 打印 JSON 报告 → 退出码 0/2）
+# 3) 无人工干预自检（跑 8s → 切四个页面截图 → 打印 JSON 报告 → 退出码 0/2）
 python host/app.py --selftest --seconds 8 --shot out.png
 python host/app.py --selftest --real --port COM56 --gain-index 60 --seconds 12
-#    → 报告末尾 "checks": 21 项全 true，退出码 0（假固件与真板都验过）
+#    → 报告末尾 "checks": 29 项全 true，退出码 0（假固件与真板都验过）
 
 # 逻辑层自测（不开窗口）
 python -m unittest discover -s host/tests -t . -v
@@ -190,7 +191,36 @@ Windows 上也可以双击 `host/start.bat`（缺依赖会自动 `pip install`�
 
 JS → Python 的入口：`listPorts()`、`scenarios()`、`renderText()`、
 `start(configJson)` / `stop()`、`setFullscreen({on,target})`、`uiDefaults()`、
-`runtime()`、`uiReport(json)`（都在 `bridge.js` 里封装成 Promise）。
+`runtime()`、`renderWaterfall()`（强制重渲瀑布图 PNG+HTML，返回产物名）、
+`openFile(path)`（只在系统浏览器打开 `.data/` 下的产物，其它路径直接拒）、
+`uiReport(json)`（都在 `bridge.js` 里封装成 Promise）。
+
+## 周期瀑布图页（`pages/waterfall/`）
+
+数据来自 `modes/waterfall.py` 的 `web_payload()`（经 `tables` 信号 1 Hz 推送，
+`payload.kind == "waterfall"`）。三个口弸跟 PNG 完全一致：
+
+- **一行 = 一轮完整轮扫**（不是 1 s 时间桶）；一行里三个频段扫到的时刻不同，
+  所以时间刻度取每轮首帧的 `ts`。
+- **一格一字节**：`bands[].cells` 是 base64（行优先，长 = `rows × cols`），
+  0 码 = 这一格没扫到，渲染成最暗底色，不当成“信号为 0”。
+- **同一格多窗覆盖取最大保持**（后端 `fill_row` 已算好）；前端不重新归一化
+  功率码，只用 `code_lo/code_hi` 拉伸颜色（只影响显示，不改原值）。
+
+颜色映射用 `U.heatRGB()`，与 2D/3D 瀑布共用同一条色带；表格/曲线上还是一套
+"分档 → 颜色"（`U.levelColor()`），两套不许混。
+
+`produce()` 在上位机里**做最小间隔节流**（`PRODUCE_MIN_INTERVAL_S=15`）：
+`tables` 每秒都 poll 一次，不节流会每秒重渲一遍 PNG；“生成 PNG + HTML”按钮走
+`Bridge.renderWaterfall()` → `produce(force=True)` 绕过节流。产物落在
+`.data/waterfall/`（`waterfall-p*.png` / `.html` + `index.html`）。
+
+**环形缓冲的粒度是「窗」不是「帧」**：真板一次 `scan()` 能回 30+ 帧，
+一帧一条的话默认 `RING_FRAMES=1200` 连一轮（44 窗 × ~37 帧）都装不下，
+页面永远只画得出一行半。`on_snapshot()` 对同中心频率的连帧做最大保持合并，
+`frames` 仍数真帧、`ring_frames` 才是缓冲长度。卡片上的「一轮 X s」优先取
+`row_period_s`（实测墙钟周期，只用**扫满**的轮次估；凑不齐两整轮则为 0，
+退回射频时间）——多模块分时会把一轮明显拉长，这是真实读数，不是显示 bug。
 
 ## 边界（和 CLI 输出同一套口径，界面不许美化）
 
@@ -212,8 +242,13 @@ JS → Python 的入口：`listPorts()`、`scenarios()`、`renderText()`、
 | 游标一秒刷完 90 多轮、覆盖数一直是 1 | 假固件不吃 `dwell_ms`，一个窗口 3ms 就跑完 | `Runner._mock_pace()` 补节奏（见上节） |
 | 扫频进度条上没有游标 / 显示「等待扫描计划」 | `info` 是开流后才到，页面 `onEnter` 时还没有 `plans` | `app.js` 把 `info` 也 `Router.dispatch("Info", …)`，页面 `onInfo` 里补 `applyPlan()` |
 | 弹出预览一把静态文案全翻回默认值（`#raw-text` 的 ASCII 被清成「未连接」） | `Popout` 里为了翻按钮标题调了 `I18N.apply(整个面板)`，把 `data-i18n` 占位的**动态内容**一起重写了 | 只 `I18N.apply(工具栏)` + 逐个设按钮 `title`，绝不 apply 面板 |
+| 新加的按钮（如「生成 PNG + HTML」）点了没反应，Promise 直接 resolve 成 `[]`，Python 侧连日志都没有 | `@Slot(str, result=str)` 写在了**无入参**的方法上：Qt 按“要一个 str 入参”注册，网页只传回调就被吞掉 | `@Slot` 的参数表必须和方法签名严格一致（无入参就只写 `result=str`）；靠 `--selftest` 里真点一次按钮的 `waterfall_render` 项守着 |
 | 关闭浮层后面板还在浮层里 / 打不开第二次 | 浮层元素只是 `hidden`，探针按「元素存在」判断成没关 | 判据改成 `.popout:not([hidden])` 与 `overlay.hidden`；关闭时把面板 `insertBefore` 回原位 |
 | 弹出/放大后画布高度一点没变，下面一大片空白 | 页面 resize 钩子用 `root.querySelector("#spec-canvas")`，面板被搬到 `body` 下的浮层后就不在 `root` 里了 → 拿到 `null` 抛 `TypeError`，整段重绘中断 | 浮层挂到 `#page-container` 内（`position: fixed`，视觉不变），`fitCanvas(null)` 也返回空对象不再抛错 |
 | 点「全屏」没反应，布局跟普通窗口一模一样 | 合成点击没有用户手势，Chromium 拒 `requestFullscreen()`（`QtWebEngine` 的 `fullScreenRequested` 压根没触发） | 全屏走 `Bridge.setFullscreen` → Python `win.showFullScreen()`；DOM API 只作纯浏览器兜底 |
 | 独立窗口里画面空白/不刷新 | 新窗口晚连上，`QWebChannel` 之前的信号全丢了 | `runtime()` 带回最后 `spectrum`/`tables`，`syncRuntime()` 直接回放；`HostWindow` 缓存两份 JSON |
+| 点自检必崩：`Windows fatal exception: stack overflow`，exit=127，**没有 Python 回溯**，主线程停在 `app.exec()` | `finish()` 是模块级函数 `run_selftest(...)` 里的闭包，里面误用了 `self.session` / `self.runner`：`self` 在该作用域根本不存在 → `NameError` 在 Qt 回调里抛出，PySide6 直接进程级栈溢出。包在 `try/except` 里的那半段更阴——异常被吞掉，`share` 一直是 `{}` | 闭包里一律 `window.xxx`；**别在主线程读正在跑的 `QThread` 实例属性**，用窗口持有的普通 dict（`stats_box`）中转收集线程的数据 |
+| 瀑布图页「没数据」但后端在读射频：一轮 4.4 s 实际走了 5 分钟 | `slice_weight` 悬殊（`wifi_check=40.0` vs `waterfall=0.8`），平滑加权轮询把射频几乎全给了 wifi，share 实测 `{waterfall: 0.016}` | 单射频共享要**公平配比**：两边都 `slice_weight = 1.0`（各半），selftest 的 `share`/`waterfall_share` 项守着（实测 0.5 / 0.5） |
+| 多模块同时跑时，扫频进度条游标乱跳、`visited` 一直是 1 | 页面每收到一帧就按 **该帧所属模块** 重设计划，计划在 `waterfall`/`wifi_check` 之间来回换，`visited` 每帧被清空 | 进度条**只跟一个模块**的计划（`planModule` 固定首个计划），只喂匹配模块的帧 |
+| 20 MHz 窗 / 15 MHz 步进下，进度条覆盖数涨得极慢 | 窗是**重叠**的，相邻格最近匹配会前后抖；「索引变小 = 换轮」被抖动误判成换轮，反复清空 `visited` | 换轮判据加幅度门槛：只有「跳回大半张图」（`index - found > plan.length / 2`）才算换轮 |
 | 网页报错查不到 | 默认不打印前端 console | `ConsolePage.javaScriptConsoleMessage` 转发到 stdout（`[js:err] 文件:行 消息`） |

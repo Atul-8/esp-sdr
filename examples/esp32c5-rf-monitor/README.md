@@ -61,16 +61,16 @@ python host/app.py --port COM56 --gain-index 60          # 真板
 python host/app.py --selftest --seconds 8 --shot out.png # 自动自检（退出码 0/2）
 ```
 
-三个页面：实时频谱（2D 曲线 + 3D 瀑布 + 2D 瀑布）、WiFi 信道体检（排序表 +
-3D 柱状图 + 推荐）、原始输出（任意模块表格兜底 + CLI 同款 ASCII）。
+四个页面：实时频谱（2D 曲线 + 3D 瀑布 + 2D 瀑布）、周期瀑布图（全频段时频
+热力图 + 一键出 PNG/HTML）、WiFi 信道体检（排序表 + 3D 柱状图 + 推荐）、
+原始输出（任意模块表格兜底 + CLI 同款 ASCII）。
 细节与「怎么加新实验页」见 `host/README.md`。
 
 ## 接真机
 
 ```sh
 pip install pyserial
-python -m app.live --port COM5 --duration 60 --gain-index 60  # Windows（固定增益才有可比性）
-python -m app.live --port /dev/ttyACM0 --duration 60 --gain-index 60
+python -m app.live --port COM5 --duration 60 --gain-index 60  # Windows（固定增益才有可比性）python -m app.live --port /dev/ttyACM0 --duration 60 --gain-index 60
 python -m app.live --mock --duration 5                # 同一条代码路径的假固件版
 ```
 

@@ -152,7 +152,9 @@ class WifiCheck(ModePlugin):
 
     id: str = "wifi_check"
     name: str = "WiFi 信道体检"
-    slice_weight: float = 40.0
+    # 射频时间份额：单射频分时，本模块与 waterfall 各占一半（40.0 会把瀑布图饿死：
+    # 实测 share 0.984 vs 0.016，一轮 44 窗要 5 分钟才扫完）
+    slice_weight: float = 1.0
 
     dwell_ms: int = 100
     bins: int = 1024

@@ -18,7 +18,7 @@
 | 3 | `feat/3-ble-risk` | BLE 风险与环境评估 | `[TODO]` |
 | 4 | `feat/4-guard-58g` | 5.8G 频段守卫 | `[TODO]` |
 | 5 | `feat/5-capture` | 可疑信号抓拍（含分类器） | `[TODO]` |
-| T | `feat/host-gui` | 图形上位机（WebView，跨阶段工具，不占功能阶段） | `[REVIEW]` 待人类验收（含双击弹出预览 + 高度自适应 + 真全屏 + 独立窗口 + 2D 瀑布频率轴） |
+| T | `feat/host-gui` | 图形上位机（WebView，跨阶段工具，不占功能阶段） | `[REVIEW]` 待人类验收（含双击弹出预览 + 高度自适应 + 真全屏 + 独立窗口 + 2D 瀑布频率轴 + 周期瀑布图页） |
 
 ---
 
@@ -125,7 +125,7 @@ BAND_5_HZ    = (5_170_000_000, 5_835_000_000)   # → 44 个窗：5180…5825，
 验收材料（`docs/02-waterfall.md` 有完整版）：
 
 ```bash
-python -m unittest discover -s tests -t .        # Ran 82 tests / OK
+python -m unittest discover -s tests -t .        # Ran 103 tests / OK（含 feat/host-gui 合并；纯本分支 82）
 python -m app.waterfall --minutes 10 --scenario microwave --db .data/wf/microwave.db --out .data/wf/microwave --ascii
 python -m app.waterfall --minutes 10 --scenario mixed     --db .data/wf/mixed.db     --out .data/wf/mixed     --ascii
 python -m app.waterfall --render-only --db .data/wf/mixed.db --out .data/wf/mixed   # 只重渲染
@@ -135,7 +135,7 @@ python -m app.waterfall --render-only --db .data/wf/mixed.db --out .data/wf/mixe
 
 | 验收项 | 判据 | 结果 |
 | --- | --- | --- |
-| 自测全绿 | `unittest` 0 失败 | ✅ 82 passed（新增 `test_png` 10 / `test_heatmap` 15 / `test_waterfall` 14） |
+| 自测全绿 | `unittest` 0 失败 | ✅ 103 passed（新增 `test_png` 10 / `test_heatmap` 15 / `test_waterfall` 20） |
 | 轮扫覆盖 | 三频段首尾压边、步进 ≤ 15 MHz、相邻窗重叠 | ✅ 2.4G 6 窗 / 5G LOW 13 / 5G HIGH 25，共 **44 窗一轮** |
 | 快照顺路入库 | 10 分钟 mock 入库帧数 == 生成帧数 | ✅ 5984 / 5984，`source_errors 0` |
 | 分页不丢帧 | 10 分钟 → 2 页，页帧数之和 == 总数 | ✅ 3036 + 2948 = 5984 |
@@ -144,6 +144,8 @@ python -m app.waterfall --render-only --db .data/wf/mixed.db --out .data/wf/mixe
 | WiFi 突发块 | 窄（< 30 MHz）+ 时间轴有暗行 | ✅ 2432–2442，min 22 / max 137 |
 | 无假信号 | `quiet` 不出现连续亮带 | ✅ `runs_above(p50+8)` 为空 |
 | 边界声明 | 「周期快照，非连续实时」+「相对码不是 dBm」 | ✅ PNG 页眉 / HTML banner / 页脚 / CLI 四处 |
+| **上位机真板联调**（合入 `feat/host-gui` 后） | 自检 29 项全绿 + 瀑布页真在滚动 | ✅ `--selftest --real --port COM56 --gain-index 60 --seconds 40` → 29/29、`rows 5 / sweeps 5 / painted 100%`、`share {waterfall 0.5, wifi_check 0.5}`、实测一轮 `12.4 s` |
+| 单射频公平配比 | 两个模块各拿一半射频 | ✅ `slice_weight` 都改 1.0；改前实测 share `{waterfall 0.016, wifi_check 0.984}`（瀑布一轮 5 分钟） |
 
 产物（`examples/esp32c5-rf-monitor/.data/wf/`，不入库）：
 
@@ -159,7 +161,13 @@ microwave/waterfall-p1.html 2.9 KB                 mixed/waterfall-p1.html 2.9 K
    真机数据同样进 `Store`，接口一致但**未实测**。
 2. **虚拟时间**：10 分钟数据 40~50 s 生成，时间轴是等效时间不是墙钟（产出物已注明）。
 3. **mock 逐 bin 抖动**：`SpectrumSynthesizer._is_on()` 按 bin 掷骰子，图上噪点感是 mock 特性。
-4. **上位机还没有瀑布图页**：`host/` 在 `feat/host-gui` 分支，本分支从阶段 0 切出无 `host/`。
+4. **上位机页已落地（已合并进 `feat/host-gui`）**：`host/web/pages/waterfall/`（注册表一行 + 片段 + `js/pages/waterfall.js`），
+   数据走本模块的 `web_payload()`（一行 = 一轮、一格一字节 base64、0 码 = 未扫到），
+   页上还能直接「生成 PNG + HTML」。真板 40 s 自检已验。
+5. **环形缓冲按「窗」存**（同窗连帧最大保持合并）：默认 1200 窗 ≈ 27 轮 ≈ 5 分钟；
+   按帧存时 1200 帧连一轮都装不下（真板一次 `scan()` 回 30+ 帧），页面只画得出一行半。
+6. **`row_period_s` 只用扫满的轮次估**：残轮会把周期算小（实测 1.8 s < 射频 4.4 s）；
+   凑不齐两整轮返回 0，前端退回射频时间。小时级历史仍走 `app/waterfall.py` 读 SQLite。
 
 ## [TODO] 3. BLE 风险与环境评估（feat/3-ble-risk）
 
@@ -195,8 +203,13 @@ microwave/waterfall-p1.html 2.9 KB                 mixed/waterfall-p1.html 2.9 K
   + `QThread` 采集线程（频谱 20fps / 表格 1s / 单片 0.35s）
 - `host/session.py`：纯 Python 逻辑层（无 Qt）：`HostConfig` 校验、`HostSession`
   `open/step/spectrum/tables/render_text`、`downsample_bins`（按桶取最大值，保窄带峰）
-- `host/web/`：`index.html` + 路由 + 三个页面（实时频谱 / WiFi 体检 / 原始输出）+
+- `host/web/`：`index.html` + 路由 + 四个页面（实时频谱 / 周期瀑布图 / WiFi 体检 / 原始输出）+
   本地 three.js r128（离线可用）
+- 周期瀑布图页（`web/pages/waterfall/` + `js/pages/waterfall.js`）：三频段并排的时频热力图，
+  一行 = 一轮完整轮扫、一格一字节、0 码画最暗色；鼠标读频率/功率码；按钮走
+  `Bridge.renderWaterfall()` → `produce(force=True)` 在 `.data/waterfall/` 出 PNG + HTML 翻页，
+  `Bridge.openFile()` 只在 `.data/` 内允许打开（越界直接拒）。
+  `--selftest` 新增 `waterfall_rows/painted/cards/banner/notes/sweep/render/share` 等（共 **29 项 checks**）。
 - `host/paths.py`：定位分析层（`ESPSDR_SRC` 权威值 > `host/src` > 向上 4 层）
 - `host/web/js/i18n.js` + `--lang zh|en`：外壳文案中英切换（模块自产表格沿用模块语言）
 - `host/web/js/scanbar.js`：扫频进度条（频段地图 + 回卷游标，数据来自 `info.plans`）
@@ -215,7 +228,7 @@ microwave/waterfall-p1.html 2.9 KB                 mixed/waterfall-p1.html 2.9 K
 | 验收项 | 判据 | 结果 |
 | --- | --- | --- |
 | 逻辑层自测 | `cd host && python -m unittest discover -s tests -t tests` 0 失败 | ✅ 23 passed |
-| 无人工自检（假固件） | `python app.py --selftest --seconds 8 --shot out.png` 退出码 0 | ✅ 退出码 0，**21/21 checks** |
+| 无人工自检（假固件） | `python app.py --selftest --seconds 8 --shot out.png` 退出码 0 | ✅ 退出码 0，**29/29 checks** |
 | 频谱页真的在画 | 收到帧 > 0 且 2D/3D 画布非黑比例 > 1% | ✅ 188 帧；spec 24.7% / 3D 10.1% / 2D 瀑布 11.6% |
 | **2D 瀑布真的在滚** | 缓冲行数 240；`paintedRows ≥ 10`、`distinctRows ≥ 0.9×frames`、顶部均值 > 底部 + 100 | ✅ `paintedRows 35 / frames 35 / distinctRows 32 / topMean 291 / bottomMean 33` |
 | **扫频进度条：分段** | 从 `info.plans` 自动切段，至少 2 段、总窗数 > 10 | ✅ `2.4G`（2402–2482，5 窗）+ `5G`（5170–5835，44 窗）= 49 窗 |
@@ -236,8 +249,11 @@ microwave/waterfall-p1.html 2.9 KB                 mixed/waterfall-p1.html 2.9 K
 | 换实验不改 Python | 新页面只加 `web/pages/<id>/page.html` + `registry.json` 一行 | ✅ 三页共用同一个 `app.py`，`router.js` 不认具体页名 |
 | 独立目录 | 上位机放项目根 `host/`，不依赖 `repo/` 的相对位置 | ✅ `paths.find_source()` 解析到 `…
 epo\examples\esp32c5-rf-monitor`；`ESPSDR_SRC=/tmp` 正确抛错 |
-| 真板可跑 | `--selftest --real --port COM56` 退出码 0 | ✅ 331 帧 / **21 checks 全绿**；弹出 `open 1391 → 2099 → 关闭复位`；全屏 `1032/993`；独立窗口 `spec-canvas 1463×858` |
+| 真板可跑 | `--selftest --real --port COM56` 退出码 0 | ✅ 40 s → **29/29 checks 全绿**（598 频谱帧）；瀑布页 `rows 5 / sweeps 5 / painted 100%`、`share {waterfall 0.5, wifi_check 0.5}`、实测一轮 `12.4 s`；弹出 `open 1391 → 2099 → 关闭复位`；全屏 `1032/993`；独立窗口 `spec-canvas 1463×858` |
 | 边界一致 | 界面上「功率码不是 dBm」「周期快照」「固定增益才可比」 | ✅ 纵轴/提示/说明页脚都写了 |
+| **单射频配比公平** | 两个模块各拿一半射频（`share` 各 ≈0.5） | ✅ 两边 `slice_weight=1.0`；改前实测 `{waterfall 0.016, wifi_check 0.984}`（瀑布一轮被拉成 5 分钟） |
+| **进度条只跟一个计划** | 多模块同跑时不因换计划把 `visited` 清零 | ✅ `planModule` 固定；真板 40 s 探针 `visited 15 / passes 1` |
+| **重叠窗不误判换轮** | 「索引变小」加幅度门槛（跳回大半张图才算换轮） | ✅ `scanbar.js` 用 `index - found > plan.length/2` |
 
 未覆盖（必须诚实标注）：
 
@@ -272,6 +288,9 @@ epo\examples\esp32c5-rf-monitor`；`ESPSDR_SRC=/tmp` 正确抛错 |
 - ~~5G 宽窗归属口径~~：已由人类裁决「可以窄、多次移动扫描、允许重叠」→ 本轮落实为
   20MHz 窗 / 15MHz 步进重叠滑扫 + 覆盖率掩码，**已解除**。
 > 补充（任务 2 视角）：瀑布图不依赖上述两项修复，mock 与真机（`app.live`）都能出图。
+
+- **上位机瀑布图页嵌不嵌**：已按人类「烧录了就做上位机给我」需求在 `feat/host-gui` 落地（`web/pages/waterfall/`），
+  本源实现 `modes/waterfall.py:web_payload()`；不需要再等裁决。
 
 - **固定增益档位的产品化口径**：当前靠人工给 `--gain-index 60`。要不要做自动标定
   （逐档试扫、挑不饱和的最高档）需要人类定，属于应用层（不碰 `core/`）。

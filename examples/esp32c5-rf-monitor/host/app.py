@@ -32,6 +32,7 @@ from PySide6.QtWebChannel import QWebChannel
 from PySide6.QtWebEngineCore import QWebEngineSettings
 from PySide6.QtWebEngineCore import QWebEnginePage
 from PySide6.QtWebEngineWidgets import QWebEngineView
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QApplication
 
 import paths  # noqa: E402 - 本地模块，负责定位分析层
@@ -134,6 +135,21 @@ class Bridge(QObject):
         return to_json(sorted(SCENARIOS))
 
     @Slot(result=str)
+    def renderWaterfall(self) -> str:  # noqa: N802 - JS 侧用驼峰
+        """瀑布图页的「生成 PNG + HTML」按钮：强制重渲一次（绕过节流）。
+
+        注意 ``@Slot`` 的参数表必须和方法签名一致：写成 ``@Slot(str, result=str)``
+        时 Qt 会按「一个 str 入参」注册，网页只传回调就会被吞掉，前端拿到的是空值
+        （自检里实测过：Promise 直接 resolve 成 ``[]``，Python 侧根本没被调用）。
+        """
+        return to_json(self._window.render_waterfall())
+
+    @Slot(str, result=str)
+    def openFile(self, path: str) -> str:  # noqa: N802 - JS 侧用驼峰
+        """用系统默认程序打开产物（只允许 ``.data/`` 下的东西，防越权）。"""
+        return to_json(self._window.open_report(path))
+
+    @Slot(result=str)
     def renderText(self) -> str:  # noqa: N802
         session = self._window.session
         if session is None:
@@ -170,11 +186,21 @@ class Bridge(QObject):
 class Runner(QThread):
     """射频线程：反复跑时间片，把快照/表格节流后推给前端。"""
 
-    def __init__(self, session: HostSession, bridge: Bridge, lang: str = "zh") -> None:
+    def __init__(
+        self,
+        session: HostSession,
+        bridge: Bridge,
+        lang: str = "zh",
+        box: dict[str, object] | None = None,
+    ) -> None:
         super().__init__()
         self.session = session
         self.bridge = bridge
         self.lang = lang
+        #: 最近一次 stats 快照的落脚点（**普通 dict，由窗口持有**）。
+        #: 不要把它存在 Runner 自己身上：主线程去读一个还在跑的 QThread 实例属性，
+        #: PySide6 会走原生属性查找 → 直接栈溢出崩进程（实测无任何 Python 回溯）。
+        self.box: dict[str, object] = box if box is not None else {}
         self._stop = False
         self.last_error = ""
 
@@ -227,7 +253,9 @@ class Runner(QThread):
                 now = time.time()
                 if stats is not None and now - last_slow >= TABLE_INTERVAL:
                     last_slow = now
-                    bridge.stats.emit(to_json(session.stats(stats)))
+                    snapshot = session.stats(stats)
+                    self.box["stats"] = snapshot  # 收尾时 scheduler 已拆，自检靠这份留档
+                    bridge.stats.emit(to_json(snapshot))
                     bridge.tables.emit(to_json(session.tables()))
                 if stats is not None:
                     if stats.source_errors > seen_errors:
@@ -266,7 +294,11 @@ class HostWindow(QObject):
         self.bridge = Bridge(self)
         self.session: HostSession | None = None
         self.runner: Runner | None = None
+        #: 采集线程写、主线程读的普通 dict（放 stats 留档；见 Runner.box 的注释）
+        self.stats_box: dict[str, object] = {}
         self.ui_report = ""
+        #: 最近一次 stats 快照（采集线程写；收尾自检要用 share 判定射频时间配比）
+        self.last_stats: dict[str, object] = {}
         self.page_loaded = False
         #: 最后一帧频谱 / 最后一次表格：独立窗口是「晚连上」的，靠这个立刻有内容
         self.last_spectrum = ""
@@ -299,6 +331,56 @@ class HostWindow(QObject):
 
     def ui_defaults(self) -> dict[str, object]:
         return {"lang": self.lang, "port": self.default_port, "gain_index": self.default_gain}
+
+    # ---- 瀑布图出图（网页按钮 → Python） ---------------------------------
+    def render_waterfall(self) -> dict[str, object]:
+        """强制渲染最新时频热力图，返回产物路径给网页。
+
+        为什么放在 GUI 线程里跑：一次渲染量的是环形缓冲（最多 1200 帧），
+        实测 27 轮扫描约 0.5 s，冷启动秒级；为它单开线程不值得，
+        代价是点按钮瞬间界面卡一下（按钮文案已换「生成中…」）。
+        """
+        session = self.session
+        if session is None:
+            return {"ok": False, "error": tr(self.lang, "not_connected")}
+        plugin = None
+        for item in session.registry.plugins:
+            if getattr(item, "id", "") == "waterfall":
+                plugin = item
+                break
+        if plugin is None:
+            return {"ok": False, "error": "modes/ 里没有 waterfall 模块"}
+        try:
+            output = plugin.produce(force=True)
+        except Exception as exc:  # noqa: BLE001 - 界面上要看到原因
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+        payload = output.payload or {}
+        files = [str(item) for item in (output.files or [])]
+        index = str(payload.get("index") or "")
+        png = next((f for f in files if f.lower().endswith(".png")), "")
+        html = index if index else next((f for f in files if f.lower().endswith(".html")), "")
+        return {
+            "ok": True,
+            "pages": int(payload.get("pages") or 0),
+            "index": index,
+            "png": os.path.basename(png) if png else "",
+            "html": os.path.basename(html) if html else "",
+        }
+
+    def open_report(self, path: str) -> dict[str, object]:
+        """用系统浏览器打开产物（只接受 ``.data/`` 之内的路径）。"""
+        target = str(path or "").strip()
+        if not target:
+            return {"ok": False, "error": "空路径"}
+        root = os.path.realpath(os.path.join(WEB_DIR, os.pardir, ".data"))
+        real = os.path.realpath(target)
+        if os.path.commonpath([root, real]) != root:
+            return {"ok": False, "error": f"只允许打开 .data/ 下的产物：{target}"}
+        if not os.path.isfile(real):
+            return {"ok": False, "error": f"文件不存在：{target}"}
+        if not QDesktopServices.openUrl(QUrl.fromLocalFile(real)):
+            return {"ok": False, "error": "系统没有可打开该文件的程序"}
+        return {"ok": True, "path": real}
 
     # ---- 页面 -------------------------------------------------------------
     def _wire_page(self, page: QWebEnginePage) -> None:
@@ -405,7 +487,7 @@ class HostWindow(QObject):
         self.session = session
         self.bridge.info.emit(to_json(info))
         self.bridge.state.emit(to_json({"state": "running", "ts": round(time.time(), 3)}))
-        self.runner = Runner(session, self.bridge, config.lang)
+        self.runner = Runner(session, self.bridge, config.lang, box=self.stats_box)
         self.runner.start()
         message = tr(config.lang, "started", what=info.get("identity") or config.port)
         return {"ok": True, "message": message, "info": info}
@@ -505,6 +587,14 @@ def run_selftest(app: QApplication, view: QWebEngineView, window: HostWindow, ar
                 return { ok: opened, themed: themed, back: !p.classList.contains('panel--popped') };
             })()
         })""",
+        "waterfall": """JSON.stringify({
+            probe: (window.Pages.waterfall && Pages.waterfall.probe ? Pages.waterfall.probe() : null),
+            cards: document.querySelectorAll('#page-container .card').length,
+            banner: (((document.querySelector('#wf-banner')||{}).textContent) || '').length,
+            files: (((document.querySelector('#wf-files')||{}).textContent) || '').length,
+            sweep: (((document.querySelector('#wf-sweep-s')||{}).textContent) || ''),
+            sweepNote: (((document.querySelector('#wf-sweep-note')||{}).textContent) || '')
+        })""",
         "raw": """JSON.stringify({
             panels: document.querySelectorAll('#raw-tables .panel').length,
             tables: document.querySelectorAll('#raw-tables table').length,
@@ -517,6 +607,8 @@ def run_selftest(app: QApplication, view: QWebEngineView, window: HostWindow, ar
         spectrum = pages.get("spectrum", {}) if isinstance(pages, dict) else {}
         wifi = pages.get("wifi", {}) if isinstance(pages, dict) else {}
         raw = pages.get("raw", {}) if isinstance(pages, dict) else {}
+        wf_page = pages.get("waterfall", {}) if isinstance(pages, dict) else {}
+        wf_page_probe = (wf_page.get("probe") or {}) if isinstance(wf_page, dict) else {}
         canvases = spectrum.get("canvases", []) if isinstance(spectrum, dict) else []
         drawn = [c for c in canvases if float(c.get("nonBlack", 0)) > 0.01]
         frames = int(spectrum.get("framesSeen", 0) or 0)
@@ -534,6 +626,19 @@ def run_selftest(app: QApplication, view: QWebEngineView, window: HostWindow, ar
         pp_zoom = popout.get("zoom") or {}
         pp_close = popout.get("close") or {}
         pp_win = report.get("popout_window") or {}
+        share: dict[str, object] = {}
+        try:
+            # 注意：finish() 是模块级函数里的闭包，只能拿 window.*，用 self.* 会 NameError
+            # （在 Qt 回调里抛异常是 C 级栈溢出、连 Python 回溯都没有，排查成本极高）
+            cached = window.stats_box.get("stats") or {}
+            share = dict(cached.get("share") or {})
+            if not share and window.session is not None:
+                share = dict((window.session.stats() or {}).get("share") or {})
+        except Exception:  # noqa: BLE001 - 自检收尾不该因统计失败而崩
+            share = {}
+        report["share"] = share
+
+
         report["canvases_drawn"] = len(drawn)
         report["frames_seen"] = frames
         checks = {
@@ -551,7 +656,9 @@ def run_selftest(app: QApplication, view: QWebEngineView, window: HostWindow, ar
             # 扫频进度条：至少切出两个频段（2.4G / 5G），游标在轨道内、已走过多个窗
             "scanbar_bands": len(bar_groups) >= 2 and int(bar.get("windows", 0) or 0) > 10,
             "scanbar_progress": (
-                int(bar.get("visited", 0) or 0) >= 3
+                # 与 waterfall 平分射频后 8s 内只走过 2 个窗（独占时 >3）；
+                # 这里守的是"游标在轨道内真的在动"，不是"动得快"
+                int(bar.get("visited", 0) or 0) >= 2
                 and int(bar.get("index", -1)) >= 0
                 and 0 <= int(bar.get("x", -1)) <= int(bar.get("width", 0) or 0)
             ),
@@ -609,6 +716,17 @@ def run_selftest(app: QApplication, view: QWebEngineView, window: HostWindow, ar
             "wifi_notes": int(wifi.get("notes", 0) or 0) >= 3,
             "raw_panels": int(raw.get("panels", 0) or 0) >= 1,
             "raw_text": int(raw.get("textLen", 0) or 0) > 40,
+            # 瀑布图页：页面自报的画布/卡片/声明都到位，且热力图像素真画上了
+            "waterfall_rows": int(wf_page_probe.get("rows", 0) or 0) >= 1,
+            "waterfall_painted": float(wf_page_probe.get("painted", 0) or 0) > 1.0,
+            "waterfall_cards": int(wf_page.get("cards", 0) or 0) >= 4,
+            "waterfall_banner": int(wf_page.get("banner", 0) or 0) > 20,
+            "waterfall_notes": int(wf_page_probe.get("notes", 0) or 0) >= 3,
+            "waterfall_sweep": str(wf_page.get("sweep", "")).endswith(" s"),
+            # 单射频分时：瀑布图必须真拿到射频时间，不能被 wifi_check 饿死
+            "waterfall_share": float(share.get("waterfall", 0) or 0) >= 0.3,
+            "waterfall_render": bool((report.get("waterfall_render") or {}).get("open"))
+            and len(str((report.get("waterfall_render") or {}).get("files", ""))) > 10,
         }
         report["checks"] = checks
         ok = all(checks.values())
@@ -642,12 +760,45 @@ def run_selftest(app: QApplication, view: QWebEngineView, window: HostWindow, ar
             if page_id == "spectrum":
                 # 频谱页验完顺手验「双击弹出预览」，再验中英切换，然后保持英文继续验后面的页
                 QTimer.singleShot(300, lambda: popout_test(lambda: popout_window_test(lambda: popout_fullscreen_test(lambda: switch_lang(nxt[0])))))
+            elif page_id == "waterfall":
+                # 瀑布图页：点一次「生成 PNG + HTML」，验 JS→Bridge→produce(force) 整条链路
+                waterfall_render_test(lambda: stage(nxt[0]))
             elif nxt:
                 QTimer.singleShot(400, lambda: stage(nxt[0]))
             else:
                 finish()
 
         QTimer.singleShot(1800, probe)
+
+    def waterfall_render_test(then) -> None:
+        """点瀑布图页的「生成 PNG + HTML」，等生成完后读回状态行。
+
+        为什么放 4.5 s 后读：渲染是同步跑的（QThread 里没占，直接在主线程），
+        一次 buffered 全量渲染约 0.1～1 s；固定等 4.5 s 是为了避开慢机器抖动，
+        免得把「还没回包」误判为失败。
+        """
+
+        def read_back() -> None:
+            view.page().runJavaScript(
+                "JSON.stringify({files: ((document.querySelector('#wf-files')||{}).textContent||''),"
+                " open: !((document.querySelector('#wf-open')||{}).disabled)})",
+                0,
+                collect_render,
+            )
+
+        def collect_render(result: object) -> None:
+            try:
+                payload = json.loads(str(result)) if result else {}
+            except Exception:  # noqa: BLE001
+                payload = {"parse_error": str(result)}
+            report["waterfall_render"] = payload
+            steps.append(f"瀑布图出图：{json.dumps(payload, ensure_ascii=False)}")
+            then()
+
+        view.page().runJavaScript(
+            "(function(){const b=document.querySelector('#wf-render'); if(b){b.click(); return true;} return false;})()"
+        )
+        QTimer.singleShot(4500, read_back)
 
     def popout_test(then) -> None:
         """双击面板 → 浮层 → 放大 150% 重画 → 关闭复位。结果由 Popout.selftest() 写进 window.__popout。"""
@@ -798,7 +949,7 @@ def run_selftest(app: QApplication, view: QWebEngineView, window: HostWindow, ar
 
         QTimer.singleShot(700, probe_lang)
 
-    ORDER = ["spectrum", "wifi", "raw"]
+    ORDER = ["spectrum", "waterfall", "wifi", "raw"]
 
     def start_after_load() -> None:
         if not window.page_loaded:

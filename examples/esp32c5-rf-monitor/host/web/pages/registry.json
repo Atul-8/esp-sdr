@@ -7,6 +7,13 @@
     "hint_en": "curve + 3D waterfall"
   },
   {
+    "id": "waterfall",
+    "title": "周期瀑布图",
+    "hint": "全频段时频图",
+    "title_en": "Periodic waterfall",
+    "hint_en": "band-sweep heatmap"
+  },
+  {
     "id": "wifi",
     "title": "WiFi 信道体检",
     "hint": "相对抬升排序",

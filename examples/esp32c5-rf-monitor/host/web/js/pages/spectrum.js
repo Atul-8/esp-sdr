@@ -221,12 +221,17 @@ window.Pages.spectrum = (function () {
   }
 
   // ---- 扫描计划（来自 Python 的 scan_requests，前端不写死频段）-------------
+  /**
+   * 进度条只跟**一个**模块的计划（第一个有计划的模块，registry 按 id 排序 → 稳定）。
+   * 早期是"谁发帧就跟谁"，两个模块（waterfall / wifi_check）计划不同 → 每帧都换计划、
+   * 游标乱跳、`visited` 每帧被清空（实测 8 s 只记到 1 个窗）。
+   */
   function applyPlan(moduleId) {
     if (!scanbar || !info) return;
     const plans = info.plans || {};
     const ids = Object.keys(plans);
     if (!ids.length) return;
-    const id = moduleId && plans[moduleId] ? moduleId : ids[0];
+    const id = planModule || (moduleId && plans[moduleId] ? moduleId : ids[0]);
     if (id === planModule) return;
     planModule = id;
     scanbar.setPlan(id, plans[id]);
@@ -249,8 +254,10 @@ window.Pages.spectrum = (function () {
       for (let i = 0; i < peak.length; i++) peak[i] = Math.max(payload.bins[i], peak[i] - PEAK_DECAY);
     }
 
-    if (payload.module && payload.module !== planModule) applyPlan(payload.module);
-    if (scanbar) scanbar.update(payload);
+    // 别的模块的帧不喂进度条：频点对不上本计划，只会让游标来回跳
+    if (scanbar && (!planModule || !payload.module || payload.module === planModule)) {
+      scanbar.update(payload);
+    }
     if (waterfall3d && waterfall3d.ok) waterfall3d.push(payload.bins);
     pushWaterfall(payload);
     drawWaterfall2D(payload);

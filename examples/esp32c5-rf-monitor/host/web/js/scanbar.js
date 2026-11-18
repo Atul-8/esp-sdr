@@ -131,7 +131,11 @@ window.ScanBar = (function () {
       }
       const moved = found.index !== this.index;
       if (moved) {
-        if (this.index >= 0 && found.index < this.index) {
+        // 只有"跳回大半张图"才算换轮：20MHz 窗 / 15MHz 步进是**重叠**的，
+        // 相邻窗互有覆盖，最近匹配会在相邻格之间前后抖，按"变小就算换轮"会被抖动
+        // 反复清空 visited（实测 8s 只记到 1 个窗）
+        const wrapped = this.index >= 0 && found.index < this.index && this.index - found.index > this.plan.length / 2;
+        if (wrapped) {
           this.passes += 1;          // 一轮扫完，回到起点
           this.visited.clear();
           this.wrapping = true;
