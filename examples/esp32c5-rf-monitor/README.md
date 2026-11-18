@@ -20,7 +20,9 @@ examples/esp32c5-rf-monitor/
 │   └── classifier.py     #   启发式分类器接口（任务 5 才实现）
 ├── modes/                # 五个功能各占一个文件（功能分支各自添加）
 │   ├── wifi_check.py     #   任务 1：WiFi 信道体检（20 MHz 窗 / 15 MHz 步进重叠滑扫）
-│   └── waterfall.py      #   任务 2：三频段轮扫 + 环形缓冲 + produce()
+│   ├── waterfall.py      #   任务 2：三频段轮扫 + 环形缓冲 + produce()
+│   ├── ble_risk.py       #   任务 3：BLE 广播信道风险评估（六档判词 + 证据链）
+│   └── guard_58g.py      #   任务 4：5.8G 频段守卫（持续发射源 + 告警日志 + 落事件）
 ├── output/               # 输出基础件（表格/单位格式化），各功能再自带实现
 │   ├── format.py         #   表格/单位格式化
 │   ├── png.py            #   零依赖 PNG 编码器 + 5×7 点阵（任务 2）
@@ -41,6 +43,12 @@ python -m app.demo                      # mock 全链路：注册→调度→收
 python -m app.demo --scenario ble_crowded  # 场景清单见 tests/mock_source.py:SCENARIOS
 python -m app.demo --weights "wifi_check:40,ble_risk:30,guard_58g:20,capture:10"
 python -m unittest discover -s tests -t . -v    # 全量自测
+
+# 任务 4：5.8G 频段守卫（持续发射源 + 告警日志）
+python -m app.demo --scenario video_58g --duration 14   # mock：5728–5752 宽带块 + 5740 载波 + 弱 WiFi
+#   产出：[alert] 表格（编号/类型/频点/带宽/抬升/占空比/持续时长）+ 判据原文
+#   真板：python -m app.live --port COM56 --duration 45 --gain-index 60 --db .data/guard.db
+python testing/guard_replay.py --db .data/guard.db      # 回放注入自证：往真板数据里塞一个图传
 
 # 任务 2：周期性频谱瀑布图（10 分钟等效 mock 数据 → PNG + HTML 翻页）
 python -m app.waterfall --minutes 10 --scenario mixed --ascii
