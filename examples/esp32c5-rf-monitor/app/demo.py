@@ -12,7 +12,8 @@ import sys
 import time
 from typing import Sequence
 
-from app import bind_store
+from app import bind_capture, bind_store
+from app.capture_link import CaptureAwareSource, iter_capture_plugins, synthetic_capture
 from core.registry import Registry, discover
 from core.scheduler import Scheduler
 from core.store import Store
@@ -93,8 +94,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         bound = bind_store(registry, store)
         if bound:
             print(f"事件落库已绑定：{', '.join(bound)}")
-        scheduler = Scheduler(source, registry, store=store)
+        # 任务 5：抓档排在两次扫描之间；mock 用合成 I/Q（不经串口）
+        cap_plugins = iter_capture_plugins(registry.plugins)
+        run_source: object = source
+        capture_source = None
+        if cap_plugins:
+            out_dir = os.path.join(DEFAULT_DIR, "capture")
+            bound_cap = bind_capture(registry, synthetic_capture, out_dir=out_dir)
+            capture_source = CaptureAwareSource(source, cap_plugins, synthetic_capture)
+            run_source = capture_source
+            if bound_cap:
+                print(f"抓档已绑定（合成 I/Q）：{', '.join(bound_cap)} → {out_dir}")
+        scheduler = Scheduler(run_source, registry, store=store)  # type: ignore[arg-type]
         stats = scheduler.run(duration_s=args.duration)
+        if capture_source is not None:
+            capture_source.flush()
         print()
         print(
             ascii_table(

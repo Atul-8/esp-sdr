@@ -1,0 +1,143 @@
+<div class="warn-box" id="cap-warn" hidden></div>
+
+<div class="cards" id="cap-cards">
+  <div class="card">
+    <div class="card__label" data-i18n="cap.card.records">已存证</div>
+    <div class="card__value" id="cap-records">—</div>
+    <div class="card__note" id="cap-records-note" data-i18n="cap.card.wait">等待样本</div>
+  </div>
+  <div class="card">
+    <div class="card__label" data-i18n="cap.card.triggers">判成「分不清」</div>
+    <div class="card__value" id="cap-triggers">—</div>
+    <div class="card__note" id="cap-triggers-note">—</div>
+  </div>
+  <div class="card">
+    <div class="card__label" data-i18n="cap.card.pending">待抓队列</div>
+    <div class="card__value" id="cap-pending">—</div>
+    <div class="card__note" id="cap-pending-note" data-i18n="cap.card.pendingNote">抓档只在两次扫描之间做，扫描中途不许插命令</div>
+  </div>
+  <div class="card">
+    <div class="card__label" data-i18n="cap.card.span">缓冲跨度</div>
+    <div class="card__value" id="cap-span">—</div>
+    <div class="card__note" id="cap-span-note">—</div>
+  </div>
+  <div class="card">
+    <div class="card__label" data-i18n="cap.card.analyses">分析轮次</div>
+    <div class="card__value" id="cap-analyses">—</div>
+    <div class="card__note" id="cap-analyses-note">—</div>
+  </div>
+</div>
+
+<div class="panel">
+  <div class="panel__head">
+    <span class="panel__title" data-i18n="cap.table.title">抓档清单（每条都落 IQ 文件 + sidecar）</span>
+    <span class="panel__hint" id="cap-sample" data-i18n="cap.card.wait">等待样本</span>
+  </div>
+  <div class="panel__body">
+    <table class="chtable">
+      <thead>
+        <tr>
+          <th data-i18n="cap.col.id">编号</th>
+          <th data-i18n="cap.col.freq">频点</th>
+          <th data-i18n="cap.col.samples">样本</th>
+          <th data-i18n="cap.col.fmt">格式</th>
+          <th data-i18n="cap.col.dur">时长</th>
+          <th data-i18n="cap.col.label">分类</th>
+          <th data-i18n="cap.col.conf">置信</th>
+          <th data-i18n="cap.col.peak">峰值码</th>
+          <th data-i18n="cap.col.reason">判定理由</th>
+          <th data-i18n="cap.col.file">存档</th>
+        </tr>
+      </thead>
+      <tbody id="cap-rows"><tr><td colspan="10" class="muted" data-i18n="cap.waitData">还没有数据：点顶部「开始」</td></tr></tbody>
+    </table>
+  </div>
+</div>
+
+<div class="panel" id="cap-audit-panel">
+  <div class="panel__head">
+    <span class="panel__title" data-i18n="cap.audit.title">一键体检结论（只读当前已扫到的数据）</span>
+    <button class="btn" id="cap-audit-run" data-i18n="cap.audit.run">生成结论</button>
+    <span class="panel__hint" id="cap-audit-hint" data-i18n="cap.audit.hint">不重新跑扫描、不新抓档；要正式一分钟报告请跑 python -m app.audit</span>
+  </div>
+  <div class="panel__body">
+    <div class="big-risk" id="cap-audit-headline">—</div>
+    <div class="card__note" id="cap-audit-why" data-i18n="cap.card.wait">等待样本</div>
+    <table class="chtable">
+      <thead>
+        <tr>
+          <th data-i18n="cap.audit.col.source">来源</th>
+          <th data-i18n="cap.audit.col.kind">类型</th>
+          <th data-i18n="cap.audit.col.freq">频点</th>
+          <th data-i18n="cap.audit.col.level">等级</th>
+          <th data-i18n="cap.audit.col.detail">依据</th>
+        </tr>
+      </thead>
+      <tbody id="cap-audit-rows"><tr><td colspan="5" class="muted" data-i18n="cap.audit.empty">点「生成结论」按当前数据出一张源清单</td></tr></tbody>
+    </table>
+    <ul class="notes" id="cap-audit-boundary"><li class="muted" data-i18n="cap.card.wait">等待样本</li></ul>
+  </div>
+</div>
+
+<div class="panel">
+  <div class="panel__head">
+    <span class="panel__title" data-i18n="cap.filter.title">为什么没抓（逐条过滤计数）</span>
+    <span class="panel__hint" data-i18n="cap.filter.hint">每一档都是一条会挡住抓拍的规矩；数字涨得太快说明环境太吵或门槛需要重标</span>
+  </div>
+  <div class="panel__body">
+    <table class="chtable">
+      <thead>
+        <tr>
+          <th data-i18n="cap.filter.item">过滤档</th>
+          <th data-i18n="cap.filter.count">本轮</th>
+          <th data-i18n="cap.filter.why">为什么挡</th>
+        </tr>
+      </thead>
+      <tbody id="cap-filter-rows"><tr><td colspan="3" class="muted" data-i18n="cap.waitData">还没有数据：点顶部「开始」</td></tr></tbody>
+    </table>
+  </div>
+</div>
+
+<div class="panel">
+  <div class="panel__head">
+    <span class="panel__title" data-i18n="cap.spur.title">本机杂散清单（报出来但不抓）</span>
+    <span class="panel__hint" data-i18n="cap.spur.hint">窄带持续、宽度 ≤ 门槛的源多半是本振/时钟：抓它只会把「可疑」刷满</span>
+  </div>
+  <div class="panel__body">
+    <table class="chtable">
+      <thead>
+        <tr>
+          <th data-i18n="cap.col.freq">频点</th>
+          <th data-i18n="cap.spur.width">宽度</th>
+          <th data-i18n="cap.spur.fill">占空</th>
+          <th data-i18n="cap.spur.peak">抬升</th>
+          <th data-i18n="cap.spur.dur">持续</th>
+        </tr>
+      </thead>
+      <tbody id="cap-spur-rows"><tr><td colspan="5" class="muted" data-i18n="cap.spur.none">还没有确认为本机杂散的窄带源</td></tr></tbody>
+    </table>
+  </div>
+</div>
+
+<div class="panel">
+  <div class="panel__head">
+    <span class="panel__title" data-i18n="cap.th.title">当前生效的门槛（模块下发，前端零硬编码）</span>
+    <span class="panel__hint" data-i18n="cap.th.hint">改判据只改 modes/capture.py 顶部常量，这张表跟着变</span>
+  </div>
+  <div class="panel__body">
+    <table class="chtable">
+      <thead>
+        <tr>
+          <th data-i18n="cap.th.key">门槛</th>
+          <th data-i18n="cap.th.value">当前值</th>
+        </tr>
+      </thead>
+      <tbody id="cap-th-rows"><tr><td colspan="2" class="muted" data-i18n="cap.waitData">还没有数据：点顶部「开始」</td></tr></tbody>
+    </table>
+  </div>
+</div>
+
+<div class="panel">
+  <div class="panel__head"><span class="panel__title" data-i18n="cap.notes.title">判据与边界</span></div>
+  <ul class="notes" id="cap-notes"><li class="muted" data-i18n="cap.card.wait">等待样本</li></ul>
+</div>
