@@ -125,11 +125,19 @@ window.U = (function () {
   }
 
   /** 高清屏画布：CSS 尺寸 → 物理像素，返回 ctx（已按 dpr 缩放，绘制坐标仍是 CSS px） */
+  /** 弹出预览的缩放倍率（Panel 上设的 --fit-scale；没有就是 1） */
+  function fitScale(el) {
+    if (!el || !window.getComputedStyle) return 1;
+    const raw = getComputedStyle(el).getPropertyValue("--fit-scale");
+    const value = parseFloat(raw);
+    return Number.isFinite(value) && value > 0 ? value : 1;
+  }
+
   function fitCanvas(canvas, cssHeight) {
     const dpr = window.devicePixelRatio || 1;
     const rect = canvas.getBoundingClientRect();
     const width = Math.max(320, Math.round(rect.width || canvas.clientWidth || 640));
-    const height = Math.round(cssHeight || rect.height || 220);
+    const height = Math.round((cssHeight || rect.height || 220) * fitScale(canvas));
     canvas.width = Math.round(width * dpr);
     canvas.height = Math.round(height * dpr);
     canvas.style.height = height + "px";
@@ -142,6 +150,6 @@ window.U = (function () {
     fmtHz, fmtMHz, fmtPct, fmtDb,
     levelClass, levelColor, levelText,
     heat, heatT, heatHex, heatHexT, heatRGB,
-    AutoRange, el, fitCanvas,
+    AutoRange, el, fitCanvas, fitScale,
   };
 })();

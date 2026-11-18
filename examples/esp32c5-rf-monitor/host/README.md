@@ -12,7 +12,7 @@ host/
 ├── session.py         # 纯 Python 逻辑层（无 Qt，可单独测）：配置校验 / 会话 / 频谱打包
 ├── start.bat          # Windows 双击启动（缺依赖自动装）
 ├── requirements.txt   # PySide6 + pyserial
-├── tests/test_session.py  # 15 条无窗口自测
+├── tests/test_session.py  # 23 条无窗口自测
 └── web/
     ├── index.html     # 唯一入口：顶栏 + 导航 + #page-container + 页脚
     ├── css/app.css    # 暗色仪表盘主题
@@ -22,6 +22,9 @@ host/
     │   ├── util.js    # 单位格式化 + 分档配色 + 热力色带 + 画布适配
     │   ├── three3d.js # 3D 瀑布曲面 / 3D 信道柱状图
     │   ├── router.js  # 按 registry.json 加载片段（XHR，QWebEngine 不支持 file:// 的 fetch）
+    │   ├── popout.js  # 双击任意面板 → 全窗口预览 + 自定义缩放
+    │   ├── scanbar.js # 扫频进度条（2.4G/5G 频段地图 + 回卷游标）
+    │   ├── i18n.js    # 中英切换（只翻外壳 + 结构化数据）
     │   ├── app.js     # 外壳装配 + 事件路由 + 自检探针 window.probeReport()
     │   └── pages/     # 各实验自己的渲染逻辑
     └── pages/
@@ -45,6 +48,7 @@ python host/app.py --mock --scenario wifi_busy
 # 3) 无人工干预自检（跑 8s → 切三个页面截图 → 打印 JSON 报告 → 退出码 0/2）
 python host/app.py --selftest --seconds 8 --shot out.png
 python host/app.py --selftest --real --port COM56 --gain-index 60 --seconds 12
+#    → 报告末尾 "checks": 18 项全 true，退出码 0（假固件与真板都验过）
 
 # 逻辑层自测（不开窗口）
 python -m unittest discover -s host/tests -t . -v
@@ -89,6 +93,39 @@ Windows 上也可以双击 `host/start.bat`（缺依赖会自动 `pip install`�
   实测：假固件 ≈ 8~10 窗/秒，真机 ≈ 4 窗/秒（串口解析 1024 点才是瓶颈，
   不是 100ms 驻留），一轮 49 窗约 12s。
 
+## 双击弹出预览（`web/js/popout.js`）
+
+**任何一个 `.panel` 双击就弹成全窗口预览**，右上角也有个 `⤢` 按钮（双击不显眼，
+所以两个入口都给）。工具栏能做的事：
+
+- `−` / `+`：**自定义缩放**，75% → 100% → 125% → 150% → 200% → 300%（12 档太密，
+  按这 6 档走）；`重置` 回 100%；`全屏` 调浏览器 Fullscreen API（QWebEngine 需要
+  宿主 accept，失败就退回「铺满窗口」，不会卡在黑白屏）；`✕`/`Esc` 关闭。
+- 浮层是**同一文档内的 fixed 覆盖层 + 原地搬 DOM**，不是 `window.open`：
+  canvas / WebGL 上下文跟着 DOM 走，搬进搬出都不丢内容，也不用给 Python 侧再加
+  一个窗口和桥。
+- 缩放是**按新尺寸重画**，不是把小图拉伸放大：面板宽度 = 倍率 × 100%，
+  同时在面板上设 `--fit-scale: 倍率`，`U.fitCanvas()` 与 3D 容器高度
+  （`#wf-3d` 的 `calc(300px * var(--fit-scale, 1))`）都乘这个倍率，
+  然后派发一次 `resize` 让页面自己的钩子重算。
+- 尺寸一变，2D 瀑布**保留历史**（把旧缓冲按新宽度重采样，`resizeWaterfall()`），
+  不再像以前那样清空重来。
+- 换页时 `Router.navigate()` 先 `Popout.close()`：浮层里那个面板属于上一页的 DOM，
+  不搬回去会被 `innerHTML =` 一起清掉。
+
+新实验页不用写任何代码就有这个功能——`Popout.attach(#page-container)` 是委托到
+`.panel` 上的，按钮也是自动加的（`MutationObserver` 兜住运行时新插入的面板）。
+
+## 2D 瀑布的频率轴
+
+`#wf-canvas` 底部有一条**简易频率轴**：轴线 + 5 个刻度（含两端）+ MHz 标签 +
+单位，中间那个刻度标亮一点，代表本窗中心频点。两条边界要说清楚：
+
+- 轴描述的是**最新一行**（当前窗）；扫频时上面旧行可能来自别的窗，所以轴不是
+  「整张图的绝对横轴」，`wf2dAxis` 也只报最新一帧的 `lo/hi/center/ticks`。
+- 刻度是按 `payload.freq_lo_hz..freq_hi_hz` 均分算的，不经 `modes/` 二次处理，
+  界面与 `python -m app.live` 的横轴一致。
+
 ## 数据契约（Python → 前端）
 
 所有信号都传**一个 JSON 字符串**（QWebChannel 会把 `QVariantList` 降级成 JS
@@ -101,6 +138,10 @@ Windows 上也可以双击 `host/start.bat`（缺依赖会自动 `pip install`�
 | `tables` | 1s | `{kind:"tables", plugins:[{id, name, weight, table:{title, columns, rows}, payload, error}]}` |
 | `stats` | 1s | `{kind:"stats", slices, snapshots, elapsed_s, source_errors, last_source_error}` |
 | `state` / `log` | 事件 | 状态机与日志文本 |
+
+页面里 `probe()` 额外回给自检的键（不影响运行）：`frames`、`scanbar`、
+`wf2d`（含 `paintedRows/distinctRows/topMean/bottomMean`）、`wf2dAxis`
+（`{lo, hi, center, ticks}`，单位 MHz）。
 
 JS → Python 只有四个入口：`listPorts()`、`scenarios()`、`renderText()`、
 `start(configJson)` / `stop()`（都在 `bridge.js` 里封装成 Promise）。
@@ -124,4 +165,6 @@ JS → Python 只有四个入口：`listPorts()`、`scenarios()`、`renderText()
 | 画布全黑但帧数 > 0 | 页面切走后 `requestAnimationFrame` 停、画布尺寸 0 | `fitCanvas()` 只在 `onEnter` 里取容器尺寸；3D 组件在 `onLeave` 里 `dispose()` |
 | 游标一秒刷完 90 多轮、覆盖数一直是 1 | 假固件不吃 `dwell_ms`，一个窗口 3ms 就跑完 | `Runner._mock_pace()` 补节奏（见上节） |
 | 扫频进度条上没有游标 / 显示「等待扫描计划」 | `info` 是开流后才到，页面 `onEnter` 时还没有 `plans` | `app.js` 把 `info` 也 `Router.dispatch("Info", …)`，页面 `onInfo` 里补 `applyPlan()` |
+| 弹出预览一把静态文案全翻回默认值（`#raw-text` 的 ASCII 被清成「未连接」） | `Popout` 里为了翻按钮标题调了 `I18N.apply(整个面板)`，把 `data-i18n` 占位的**动态内容**一起重写了 | 只 `I18N.apply(工具栏)` + 逐个设按钮 `title`，绝不 apply 面板 |
+| 关闭浮层后面板还在浮层里 / 打不开第二次 | 浮层元素只是 `hidden`，探针按「元素存在」判断成没关 | 判据改成 `.popout:not([hidden])` 与 `overlay.hidden`；关闭时把面板 `insertBefore` 回原位 |
 | 网页报错查不到 | 默认不打印前端 console | `ConsolePage.javaScriptConsoleMessage` 转发到 stdout（`[js:err] 文件:行 消息`） |

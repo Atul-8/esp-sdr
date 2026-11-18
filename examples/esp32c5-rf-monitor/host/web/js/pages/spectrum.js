@@ -50,7 +50,7 @@ window.Pages.spectrum = (function () {
     resizeTimer = setTimeout(() => {
       if (!root) return;
       spec = U.fitCanvas(root.querySelector("#spec-canvas"), 210);
-      wf2d = makeWaterfall(root.querySelector("#wf-canvas"), 150); // 尺寸变了就丢弃历史，避免拉伸
+      wf2d = resizeWaterfall(wf2d, root.querySelector("#wf-canvas"), 150); // 保留历史，按新宽度重采样
       if (waterfall3d && waterfall3d.ok) waterfall3d.resize();
       if (scanbar) scanbar.resize();
       drawSpectrum(lastPayload);
@@ -88,6 +88,30 @@ window.Pages.spectrum = (function () {
     };
   }
 
+  /** 画布尺寸变了：把已有历史按新宽度缩放过去，不清空（弹出预览/缩放时有用） */
+  function resizeWaterfall(old, canvas, cssHeight) {
+    const fit = U.fitCanvas(canvas, cssHeight);
+    const data = document.createElement("canvas");
+    data.width = Math.max(1, canvas.width);
+    data.height = WF_ROWS;
+    const dctx = data.getContext("2d");
+    dctx.fillStyle = "#070a10";
+    dctx.fillRect(0, 0, data.width, data.height);
+    if (old && old.data && old.data.width > 0) {
+      dctx.imageSmoothingEnabled = false;
+      dctx.drawImage(old.data, 0, 0, old.data.width, WF_ROWS, 0, 0, data.width, WF_ROWS);
+    }
+    return {
+      fit: fit,
+      data: data,
+      dctx: dctx,
+      row: dctx.createImageData(data.width, 1),
+      range: old ? old.range : new U.AutoRange(14, 0.25),
+      frames: old ? old.frames : 0,
+      axis: old ? old.axis : null,
+    };
+  }
+
   function pushWaterfall(payload) {
     if (!wf2d || !payload || !payload.bins || !payload.bins.length) return;
     const bins = payload.bins;
@@ -117,7 +141,7 @@ window.Pages.spectrum = (function () {
     ctx.restore();
 
     const padT = 15;
-    const padB = 15;
+    const padB = 19;  // 频率轴：轴线 + 刻度 + 标签，别和刻度挤在一起
     const plotH = Math.max(8, height - padT - padB);
 
     // 数据：物理像素直出，关闭插值，保证一行一帧
@@ -149,17 +173,40 @@ window.Pages.spectrum = (function () {
     ctx.fillStyle = "#8697b4";
     ctx.fillText(rangeText, width - ctx.measureText(rangeText).width - 7, 12);
 
-    // 横轴频率刻度（和上面的 2D 曲线同一根轴）
-    const fLo = payload.freq_lo_hz, fHi = payload.freq_hi_hz;
+    // 横轴频率轴（简易版）：轴线 + 5 个刻度 + MHz 标签 + 中心频点标记
+    const fLo = payload.freq_lo_hz;
+    const fHi = payload.freq_hi_hz;
+    const axisY = height - padB + 2;
+    const ticks = [];
+    ctx.strokeStyle = "rgba(134,151,180,0.35)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(0, axisY + 0.5);
+    ctx.lineTo(width, axisY + 0.5);
+    ctx.stroke();
     ctx.textAlign = "center";
     for (let k = 0; k <= 4; k++) {
-      const x = (width * k) / 4;
+      const x = Math.round((width * k) / 4) + 0.5;
       const f = fLo + ((fHi - fLo) * k) / 4;
-      ctx.fillStyle = "#5f7391";
+      ticks.push(Math.round(f / 1e6));
+      ctx.beginPath();
+      ctx.moveTo(x, axisY);
+      ctx.lineTo(x, axisY + 4);
+      ctx.stroke();
+      ctx.fillStyle = k === 2 ? "#9db3d4" : "#5f7391";
       const label = (f / 1e6).toFixed(0);
-      ctx.fillText(label, Math.min(width - 16, Math.max(16, x)), height - 4);
+      ctx.fillText(label, Math.min(width - 16, Math.max(16, x)), height - 2);
     }
+    // 单位 + 中心频点（轴只描述**最新一行**；扫频时旧行的窗可能不同）
     ctx.textAlign = "left";
+    ctx.fillStyle = "#5f7391";
+    ctx.fillText(T("spectrum.mhz"), 2, height - padB - 3);
+    wf2d.axis = {
+      lo: Math.round(fLo / 1e6),
+      hi: Math.round(fHi / 1e6),
+      center: Math.round((fLo + fHi) / 2 / 1e6),
+      ticks: ticks,
+    };
 
     // 当前帧峰值位置的竖线（和曲线上的黄点对齐）
     let maxIdx = 0;
@@ -373,6 +420,7 @@ window.Pages.spectrum = (function () {
       frames: drawn,
       scanbar: scanbar ? scanbar.probe() : null,
       wf2d: wf2d ? Object.assign({ rows: WF_ROWS, range: wf2d.range.span }, wfStats()) : null,
+      wf2dAxis: wf2d ? wf2d.axis : null,
       three: waterfall3d && waterfall3d.ok ? { pushFrames: waterfall3d.frames } : { ok: false },
     }),
   };

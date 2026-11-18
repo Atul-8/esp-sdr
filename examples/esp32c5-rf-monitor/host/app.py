@@ -365,7 +365,16 @@ def run_selftest(app: QApplication, view: QWebEngineView, window: HostWindow, ar
             rec24note: (document.querySelector('#rec24-note')||{}).textContent || '',
             notes: document.querySelectorAll('#wifi-notes li').length,
             sample: (document.querySelector('#wifi-sample')||{}).textContent || '',
-            probe: (window.Pages.wifi.probe ? Pages.wifi.probe() : null)
+            probe: (window.Pages.wifi.probe ? Pages.wifi.probe() : null),
+            popoutAny: (function () {
+                const p = document.querySelectorAll('#page-container .panel')[0];
+                if (!p || !window.Popout) return { ok: false };
+                Popout.open(p);
+                const opened = !!document.querySelector('.popout:not([hidden])') && p.parentElement.className === 'popout__stage';
+                const themed = getComputedStyle(p.querySelector('.panel__zoom') || p).display !== 'none';
+                Popout.close();
+                return { ok: opened, themed: themed, back: !p.classList.contains('panel--popped') };
+            })()
         })""",
         "raw": """JSON.stringify({
             panels: document.querySelectorAll('#raw-tables .panel').length,
@@ -389,6 +398,12 @@ def run_selftest(app: QApplication, view: QWebEngineView, window: HostWindow, ar
         bar = ((spectrum.get("pageProbe") or {}).get("scanbar") or {}) if isinstance(spectrum, dict) else {}
         bar_groups = bar.get("groups") or []
         bar_wrap = spectrum.get("scanbarSelfTest") or {} if isinstance(spectrum, dict) else {}
+        page_probe = (spectrum.get("pageProbe") or {}) if isinstance(spectrum, dict) else {}
+        axis = page_probe.get("wf2dAxis") or {}
+        popout = report.get("popout") or {}
+        pp_open = popout.get("open") or {}
+        pp_zoom = popout.get("zoom") or {}
+        pp_close = popout.get("close") or {}
         report["canvases_drawn"] = len(drawn)
         report["frames_seen"] = frames
         checks = {
@@ -423,6 +438,24 @@ def run_selftest(app: QApplication, view: QWebEngineView, window: HostWindow, ar
                 and "window 6/49" in str((i18n.get("shell") or ["", ""])[1])
                 and str((i18n.get("shell") or ["", "", "", ""])[3]) == "Heavy"
             ),
+            # 2D 瀑布频率轴：5 个刻度、升序、中点是本窗中心频点
+            "wf2d_axis": (
+                len(axis.get("ticks") or []) == 5
+                and list(axis.get("ticks") or []) == sorted(axis.get("ticks") or [])
+                # 中点 = 本窗中心频点，且落在两端之间
+                and int(axis.get("lo", 0)) < int(axis.get("center", 0)) < int(axis.get("hi", 0))
+            ),
+            # 双击弹出：浮层出现、面板搬进浮层；放大到 150% 后画布真的更宽；关闭后回到页面
+            "popout_open": bool(pp_open.get("inOverlay")) and float(pp_open.get("width", 0) or 0) > 0,
+            "popout_zoom": (
+                float(pp_zoom.get("zoom", 0) or 0) == 1.5
+                and float(pp_zoom.get("width", 0) or 0) > float(pp_open.get("width", 0) or 0) * 1.35
+            ),
+            "popout_restore": bool(pp_close.get("backHome")) and pp_close.get("overlay") is False,
+            # 换页也能弹：通用逻辑不依赖频谱页；⤢ 按钮存在
+            "popout_any_page": bool((wifi.get("popoutAny") or {}).get("ok"))
+            and bool((wifi.get("popoutAny") or {}).get("back"))
+            and bool((wifi.get("popoutAny") or {}).get("themed")),
             "wifi_rows": int(wifi.get("rows", 0) or 0) > 5,
             "wifi_recommend": bool(str(wifi.get("rec24", "")).startswith("ch")),
             "wifi_notes": int(wifi.get("notes", 0) or 0) >= 3,
@@ -459,14 +492,35 @@ def run_selftest(app: QApplication, view: QWebEngineView, window: HostWindow, ar
             report["pages"][page_id] = payload
             nxt = ORDER[ORDER.index(page_id) + 1 :]
             if page_id == "spectrum":
-                # 频谱页验完顺手验一次中英切换，然后保持英文继续验后面的页
-                QTimer.singleShot(300, lambda: switch_lang(nxt[0]))
+                # 频谱页验完顺手验「双击弹出预览」，再验中英切换，然后保持英文继续验后面的页
+                QTimer.singleShot(300, lambda: popout_test(lambda: switch_lang(nxt[0])))
             elif nxt:
                 QTimer.singleShot(400, lambda: stage(nxt[0]))
             else:
                 finish()
 
         QTimer.singleShot(1800, probe)
+
+    def popout_test(then) -> None:
+        """双击面板 → 浮层 → 放大 150% 重画 → 关闭复位。结果由 Popout.selftest() 写进 window.__popout。"""
+
+        def read_out() -> None:
+            view.page().runJavaScript(
+                "JSON.stringify(window.__popout || {})", 0, lambda r: collect_popout(r, then)
+            )
+
+        view.page().runJavaScript("Popout.selftest()")
+        QTimer.singleShot(1600, read_out)
+
+    def collect_popout(result: object, then) -> None:
+        try:
+            payload = json.loads(str(result)) if result else {}
+        except Exception:  # noqa: BLE001
+            payload = {"parse_error": str(result)}
+        payload["shot"] = shot("spectrum-popout")
+        report["popout"] = payload
+        steps.append(f"弹出预览：{json.dumps({k: payload.get(k) for k in ('open', 'zoom', 'close')}, ensure_ascii=False)}")
+        QTimer.singleShot(200, then)
 
     def switch_lang(next_id: str) -> None:
         view.page().runJavaScript("I18N.setLang('en')")

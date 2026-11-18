@@ -18,7 +18,7 @@
 | 3 | `feat/3-ble-risk` | BLE 风险与环境评估 | `[TODO]` |
 | 4 | `feat/4-guard-58g` | 5.8G 频段守卫 | `[TODO]` |
 | 5 | `feat/5-capture` | 可疑信号抓拍（含分类器） | `[TODO]` |
-| T | `feat/host-gui` | 图形上位机（WebView，跨阶段工具，不占功能阶段） | `[REVIEW]` 待人类验收 |
+| T | `feat/host-gui` | 图形上位机（WebView，跨阶段工具，不占功能阶段） | `[REVIEW]` 待人类验收（含双击弹出预览 + 2D 瀑布频率轴） |
 
 ---
 
@@ -160,6 +160,9 @@ BAND_5_HZ    = (5_170_000_000, 5_835_000_000)   # → 44 个窗：5180…5825，
 - `host/paths.py`：定位分析层（`ESPSDR_SRC` 权威值 > `host/src` > 向上 4 层）
 - `host/web/js/i18n.js` + `--lang zh|en`：外壳文案中英切换（模块自产表格沿用模块语言）
 - `host/web/js/scanbar.js`：扫频进度条（频段地图 + 回卷游标，数据来自 `info.plans`）
+- `host/web/js/popout.js`：**双击任意面板弹出预览**（铺满窗口 / 75%…300% 自定义缩放 /
+  全屏 / Esc 关闭，原地搬 DOM 不重建 canvas，缩放按新尺寸重画）
+- `host/web/js/pages/spectrum.js`：2D 瀑布底部**简易频率轴**（轴线 + 5 刻度 + MHz + 中心标亮）
 - `host/tests/test_session.py`：23 条无窗口自测
 - `host/README.md`：跑法、数据契约、**新增实验页的四步**、边界、踩坑表
 
@@ -168,19 +171,24 @@ BAND_5_HZ    = (5_170_000_000, 5_835_000_000)   # → 44 个窗：5180…5825，
 | 验收项 | 判据 | 结果 |
 | --- | --- | --- |
 | 逻辑层自测 | `cd host && python -m unittest discover -s tests -t tests` 0 失败 | ✅ 23 passed |
-| 无人工自检（假固件） | `python app.py --selftest --seconds 8 --shot out.png` 退出码 0 | ✅ 退出码 0，**13/13 checks** |
+| 无人工自检（假固件） | `python app.py --selftest --seconds 8 --shot out.png` 退出码 0 | ✅ 退出码 0，**18/18 checks** |
 | 频谱页真的在画 | 收到帧 > 0 且 2D/3D 画布非黑比例 > 1% | ✅ 188 帧；spec 24.7% / 3D 10.1% / 2D 瀑布 11.6% |
 | **2D 瀑布真的在滚** | 缓冲行数 240；`paintedRows ≥ 10`、`distinctRows ≥ 0.9×frames`、顶部均值 > 底部 + 100 | ✅ `paintedRows 35 / frames 35 / distinctRows 32 / topMean 291 / bottomMean 33` |
 | **扫频进度条：分段** | 从 `info.plans` 自动切段，至少 2 段、总窗数 > 10 | ✅ `2.4G`（2402–2482，5 窗）+ `5G`（5170–5835，44 窗）= 49 窗 |
 | **扫频进度条：游标** | 游标在轨道内、已走过 ≥ 3 个窗 | ✅ `index 44 / visited 18 / x 1043 ≤ 1208`；像素实测琥珀色游标列 `1172 → 1673 → 343（回卷）→ 938` |
 | **扫频进度条：回卷** | 喂到最后一窗再喂第一窗：轮次 +1、本轮覆盖清零 | ✅ `passesAfterWrap 2 / visitedAfterWrap 1 / indexAtEnd 3` |
 | **中英切换** | 切 `en` 后导航、状态栏、扫频条文案都变；`level` 数据值仍走显示层翻译 | ✅ `navLabels` 含 `Live spectrum`；`shell = ["Scan progress (band map)", "now 5180 MHz · window 6/49 · pass 2", "Heavy"]` |
+| **2D 瀑布有频率轴** | 5 个刻度、升序、`lo < 中线 < hi` | ✅ 探针 `wf2dAxis {lo 5710, hi 5730, center 5720, ticks [5710,5715,5720,5725,5730]}`；像素带实测 H-30 处整行 2114 px 轴线 + 5 处标签笔画 |
+| **双击弹出预览（开）** | 浮层出现、面板搬进浮层、画布宽度 > 0 | ✅ `open {overlay true, inOverlay true, width 1391}` |
+| **双击弹出预览（缩放）** | 150% 后画布宽度 > 1.35× 原宽 | ✅ `zoom {1.5, width 2099} = 1.51×`，`--fit-scale 1.5` |
+| **双击弹出预览（关）** | 关闭后浮层不可见、面板回到页面原位 | ✅ `close {overlay false, hidden true, backHome true}` |
+| **换页也能弹** | WiFi 页不写代码也能弹（通用逻辑 + ⤢ 按钮） | ✅ `popoutAny {ok true, themed true, back true}` |
 | WiFi 页真的在判 | 表格行 > 5、推荐信道有值、说明 ≥ 3 条 | ✅ 38 行；推荐 ch11 +17dB 拥挤；4 条说明 |
 | 原始页真的在输出 | 至少 1 个模块面板 + ASCII 文本 > 40 字符 | ✅ 1 面板 / 1 表 / 4364 字符 |
 | 换实验不改 Python | 新页面只加 `web/pages/<id>/page.html` + `registry.json` 一行 | ✅ 三页共用同一个 `app.py`，`router.js` 不认具体页名 |
 | 独立目录 | 上位机放项目根 `host/`，不依赖 `repo/` 的相对位置 | ✅ `paths.find_source()` 解析到 `…
 epo\examples\esp32c5-rf-monitor`；`ESPSDR_SRC=/tmp` 正确抛错 |
-| 真板可跑 | `--selftest --real --port COM56` 退出码 0 | ✅ 180 帧 / 38 行 / 推荐 ch11 +4dB 空闲 / 13 checks 全绿 |
+| 真板可跑 | `--selftest --real --port COM56` 退出码 0 | ✅ 117 帧 / **18 checks 全绿**；弹出预览 `open 1391 → 2099 → 关闭复位`；轴 `5230–5250 MHz` |
 | 边界一致 | 界面上「功率码不是 dBm」「周期快照」「固定增益才可比」 | ✅ 纵轴/提示/说明页脚都写了 |
 
 未覆盖（必须诚实标注）：
@@ -190,6 +198,9 @@ epo\examples\esp32c5-rf-monitor`；`ESPSDR_SRC=/tmp` 正确抛错 |
 - 页面刷新率受采集线程节流（20fps），**不是**固件原始帧率。
 - 扫频进度条的**段名**（2.4G / 5G）是前端按频率猜的纯装饰标签，判据全部来自
   `info.plans`；游标位置只反映「正在读哪个窗」，不表示覆盖质量。
+- 弹出预览的**「全屏」按钮**走浏览器 Fullscreen API，QWebEngine 默认不 accept，
+  失败时退回「铺满窗口」（同一层浮层），行为一致但不会真的占满显示器。
+- 缩放上限 300%：再大只是滚动，不会提升信息量（画布是按容器尺寸重渲染的，不是放大位图）。
 - 真机实测扫速 ≈ **4 窗/秒**（瓶颈是串口解析 1024 点，不是 100ms 驻留），一轮 49 窗约 12s；
   假固件补节奏后 ≈ 8–10 窗/秒。
 

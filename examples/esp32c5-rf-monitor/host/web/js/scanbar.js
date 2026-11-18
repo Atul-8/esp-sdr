@@ -25,6 +25,7 @@ window.ScanBar = (function () {
     constructor(host) {
       this.host = host;
       this.canvas = document.createElement("canvas");
+      this.canvas.id = "scanbar-canvas";  // 给自检探针一个可读名字
       this.canvas.className = "scanbar__canvas";
       host.innerHTML = "";
       host.appendChild(this.canvas);

@@ -61,6 +61,8 @@ window.Router = (function () {
 
   async function navigate(pageId) {
     const entry = registry.find((p) => p.id === pageId) || { id: pageId, title: pageId };
+    // 浮层里那个面板属于上一页的 DOM，切页前必须放回去，否则会被 innerHTML 一起清掉
+    if (window.Popout) Popout.close();
     if (current && current.mod && current.mod.onLeave) {
       try { current.mod.onLeave(); } catch (err) { console.error(err); }
     }
@@ -79,6 +81,8 @@ window.Router = (function () {
     if (mod.onEnter) {
       try { mod.onEnter(host); } catch (err) { console.error("[page]", pageId, err); }
     }
+    // 双击弹出：任何页面的任何 .panel 都通用（新实验页不用写代码）
+    if (window.Popout) Popout.attach(host);
   }
 
   /** 把桥事件转给当前页（页面只实现自己关心的那几个） */
