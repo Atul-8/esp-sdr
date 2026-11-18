@@ -817,8 +817,11 @@ def run_selftest(app: QApplication, view: QWebEngineView, window: HostWindow, ar
             "waterfall_banner": int(wf_page.get("banner", 0) or 0) > 20,
             "waterfall_notes": int(wf_page_probe.get("notes", 0) or 0) >= 3,
             "waterfall_sweep": str(wf_page.get("sweep", "")).endswith(" s"),
-            # 单射频分时：瀑布图必须真拿到射频时间，不能被 wifi_check 饿死
-            "waterfall_share": float(share.get("waterfall", 0) or 0) >= 0.3,
+            # 单射频分时：瀑布图必须真拿到射频时间，不能被别的模块饿死。
+            # 门槛按「本仓当前模块数的公平份额」算（4 模块 0.25 → 判 ≥0.21），
+            # 写死 0.3 会在模块数变化后假红（历史：3 模块时公平份额 0.333）。
+            "waterfall_share": float(share.get("waterfall", 0) or 0)
+            >= (0.85 / max(1, len(share) or 1)),
             "waterfall_render": bool((report.get("waterfall_render") or {}).get("open"))
             and len(str((report.get("waterfall_render") or {}).get("files", ""))) > 10,
         }
