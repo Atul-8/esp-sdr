@@ -41,12 +41,45 @@ from session import LANGS, WEB_DIR, HostConfig, HostSession, list_ports, to_json
 SRC_DIR = paths.ensure_on_path()
 
 class ConsolePage(QWebEnginePage):
-    """把前端 console 输出打到 Python 的 stdout：网页出错时不用开 DevTools 也能查。"""
+    """把前端 console 输出打到 Python 的 stdout：网页出错时不用开 DevTools 也能查。
+
+    同时接住 ``window.open``：前端「独立窗口」按钮就是一次 ``window.open``，
+    这里把它变成一个**真正的独立窗口**（可以拖到别的显示器），而不是被 Qt 丢掉。
+    """
+
+    #: 反向引用，由 :meth:`HostWindow.__init__` 填上
+    owner: "HostWindow | None" = None
 
     def javaScriptConsoleMessage(self, level, message, line, source):  # noqa: N802 - Qt 覆写
         name = getattr(level, "name", str(level))
         tag = {"InfoMessageLevel": "log", "WarningMessageLevel": "warn", "ErrorMessageLevel": "err"}.get(name, name)
         print(f"[js:{tag}] {source}:{line} {message}", flush=True)
+
+    def createWindow(self, _window_type):  # noqa: N802 - Qt 覆写
+        if self.owner is None:
+            return None
+        return self.owner.open_popout()
+
+
+def _loads(payload: str) -> object:
+    """把缓存的 JSON 字符串还原成对象（缓存为空时给 None）。"""
+    if not payload:
+        return None
+    try:
+        return json.loads(payload)
+    except ValueError:
+        return None
+
+
+def configure_settings(view: QWebEngineView) -> None:
+    """主窗口和每个独立窗口用同一套设置（本地文件可读、不联网、开 WebGL）。"""
+    settings = view.settings()
+    settings.setAttribute(QWebEngineSettings.LocalContentCanAccessFileUrls, True)
+    settings.setAttribute(QWebEngineSettings.LocalContentCanAccessRemoteUrls, False)
+    settings.setAttribute(QWebEngineSettings.JavascriptEnabled, True)
+    settings.setAttribute(QWebEngineSettings.JavascriptCanOpenWindows, True)
+    settings.setAttribute(QWebEngineSettings.WebGLEnabled, True)
+    settings.setAttribute(QWebEngineSettings.Accelerated2dCanvasEnabled, True)
 
 
 #: 频谱推送间隔（秒）。实板 300 帧/s，全推会灌满 QWebChannel IPC。
@@ -111,6 +144,16 @@ class Bridge(QObject):
     @Slot(str, result=str)
     def start(self, config_json: str) -> str:  # noqa: N802
         return to_json(self._window.start_run(config_json))
+
+    @Slot(str, result=str)
+    def setFullscreen(self, payload: str) -> str:  # noqa: N802 - JS 侧用驼峰
+        """网页里的「全屏」按钮。
+
+        ``element.click()`` 是合成事件、没有用户手势，``requestFullscreen()`` 会被
+        Chromium 直接拒（现场量的就是「点了没反应/跟普通布局一模一样」）。所以真正
+        的全屏由 Python 侧调窗口 API 完成：手上有窗口，不需要手势。
+        """
+        return to_json(self._window.set_fullscreen(payload))
 
     @Slot(result=str)
     def stop(self) -> str:
@@ -225,9 +268,22 @@ class HostWindow(QObject):
         self.runner: Runner | None = None
         self.ui_report = ""
         self.page_loaded = False
+        #: 最后一帧频谱 / 最后一次表格：独立窗口是「晚连上」的，靠这个立刻有内容
+        self.last_spectrum = ""
+        self.last_tables = ""
+        #: 独立窗口（window.open 来的）：(view, channel) —— channel 必须留引用，否则被 GC
+        self.popouts: list[tuple[QWebEngineView, QWebChannel]] = []
+        self.bridge.spectrum.connect(self._cache_spectrum)
+        self.bridge.tables.connect(self._cache_tables)
         #: **必须持有 QWebChannel 的 Python 引用**：只交给 setWebChannel 时对象可能被 GC，
         #: 表现是前端 new QWebChannel 回调永不触发（Bridge 一直 ready=false）。
         self.channel: QWebChannel | None = None
+
+    def _cache_spectrum(self, payload: str) -> None:
+        self.last_spectrum = payload
+
+    def _cache_tables(self, payload: str) -> None:
+        self.last_tables = payload
 
     def runtime(self) -> dict[str, object]:
         session = self.session
@@ -236,13 +292,38 @@ class HostWindow(QObject):
             "running": bool(runner is not None and runner.isRunning()),
             "info": session.describe() if session is not None else None,
             "stats": session.stats() if session is not None else None,
+            # 晚连上的窗口（独立小窗口）要靠这两个才有画面
+            "spectrum": _loads(self.last_spectrum),
+            "tables": _loads(self.last_tables),
         }
 
     def ui_defaults(self) -> dict[str, object]:
         return {"lang": self.lang, "port": self.default_port, "gain_index": self.default_gain}
 
     # ---- 页面 -------------------------------------------------------------
+    def _wire_page(self, page: QWebEnginePage) -> None:
+        """页面接线：接住 window.open，以及网页里的 requestFullscreen()。
+
+        不接 ``fullScreenRequested`` 的话 Qt 会**拒绝**全屏请求，前端就只能退化成
+        「铺满窗口」—— 用户看到的现象就是「全屏跟普通布局一模一样」。
+        """
+        if isinstance(page, ConsolePage):
+            page.owner = self
+        page.fullScreenRequested.connect(self._on_fullscreen)
+
+    def _on_fullscreen(self, request) -> None:
+        view = request.page().view() if hasattr(request, "page") else None
+        win = (view.window() if view is not None else self.view.window())
+        request.accept()
+        if request.toggleOn():
+            win.showFullScreen()
+        else:
+            win.showNormal()
+        print(f"[ui] 全屏 {'开' if request.toggleOn() else '关'}", flush=True)
+
     def load(self) -> None:
+        page = self.view.page()
+        self._wire_page(page)
         self.channel = QWebChannel(self)
         self.channel.registerObject("backend", self.bridge)
         self.view.page().setWebChannel(self.channel)
@@ -254,6 +335,58 @@ class HostWindow(QObject):
         self.bridge.state.emit(to_json({"state": "ui-loaded" if ok else "ui-load-failed"}))
         if not ok:
             print("[ui] 页面加载失败", flush=True)
+
+    def set_fullscreen(self, payload: str) -> dict[str, object]:
+        """payload = {"on": bool, "target": "main" | "popout"}（老式 true/false 也认）"""
+        try:
+            data = json.loads(payload) if payload else {}
+        except ValueError:
+            data = {}
+        if isinstance(data, bool):
+            wanted, target = data, "main"
+        else:
+            wanted = bool((data or {}).get("on"))
+            target = str((data or {}).get("target") or "main")
+        win = self.view.window()
+        if target == "popout":
+            live = self.live_popouts()
+            if live:
+                win = live[-1].window()
+        if wanted:
+            win.showFullScreen()
+        else:
+            win.showNormal()
+        return {"fullscreen": bool(win.isFullScreen()), "target": target, "on": wanted}
+
+    # ---- 独立窗口（窗口外弹窗）--------------------------------------------
+    def open_popout(self) -> QWebEnginePage:
+        """接住前端的 ``window.open``：开一个真正的窗口，共用同一个 Bridge。
+
+        新窗口加载的还是 ``web/index.html``，只是带 ``?solo=<页面:序号>``，
+        由网页自己把它变成「只显示那一个面板」。数据不用另外接：QWebChannel
+        把同一个 :class:`Bridge` 暴露给每个窗口，信号天然广播。
+        """
+        view = QWebEngineView()
+        page = ConsolePage(view)
+        view.setPage(page)
+        self._wire_page(page)
+        channel = QWebChannel(page)
+        channel.registerObject("backend", self.bridge)
+        page.setWebChannel(channel)
+        configure_settings(view)
+        view.setWindowTitle("esp-sdr · 面板窗口")
+        view.resize(1024, 680)
+        view.show()
+        self.popouts.append((view, channel))
+        view.destroyed.connect(lambda *_: self._forget_popout(view))
+        print("[ui] 独立窗口已打开", flush=True)
+        return page
+
+    def _forget_popout(self, view: QWebEngineView) -> None:
+        self.popouts = [(v, c) for (v, c) in self.popouts if v is not view]
+
+    def live_popouts(self) -> list[QWebEngineView]:
+        return [v for (v, _c) in self.popouts if v.isVisible()]
 
     # ---- 会话 -------------------------------------------------------------
     def start_run(self, config_json: str) -> dict[str, object]:
@@ -289,6 +422,8 @@ class HostWindow(QObject):
         if self.runner is not None and self.runner.isRunning():
             self.runner.request_stop()
             self.runner.wait(4000)
+        for view in list(self.live_popouts()):
+            view.close()
 
 
 def build_app(argv: list[str]) -> tuple[QApplication, QWebEngineView, HostWindow, argparse.Namespace]:
@@ -312,13 +447,7 @@ def build_app(argv: list[str]) -> tuple[QApplication, QWebEngineView, HostWindow
     view = QWebEngineView()
     view.setPage(ConsolePage(view))
     view.resize(width, height)
-    settings = view.settings()
-    # 本地页面要能读本地 css/js（three.js vendor 就在本地），不需要联网
-    settings.setAttribute(QWebEngineSettings.LocalContentCanAccessFileUrls, True)
-    settings.setAttribute(QWebEngineSettings.LocalContentCanAccessRemoteUrls, False)
-    settings.setAttribute(QWebEngineSettings.JavascriptEnabled, True)
-    settings.setAttribute(QWebEngineSettings.WebGLEnabled, True)
-    settings.setAttribute(QWebEngineSettings.Accelerated2dCanvasEnabled, True)
+    configure_settings(view)
     view.setWindowTitle("esp-sdr 测试上位机 · ESP32-C5 射频监测")
     view.show()
 
@@ -404,6 +533,7 @@ def run_selftest(app: QApplication, view: QWebEngineView, window: HostWindow, ar
         pp_open = popout.get("open") or {}
         pp_zoom = popout.get("zoom") or {}
         pp_close = popout.get("close") or {}
+        pp_win = report.get("popout_window") or {}
         report["canvases_drawn"] = len(drawn)
         report["frames_seen"] = frames
         checks = {
@@ -452,6 +582,24 @@ def run_selftest(app: QApplication, view: QWebEngineView, window: HostWindow, ar
                 and float(pp_zoom.get("width", 0) or 0) > float(pp_open.get("width", 0) or 0) * 1.35
             ),
             "popout_restore": bool(pp_close.get("backHome")) and pp_close.get("overlay") is False,
+            # 全屏/放大后高度自适应：面板高度贴着浮层高度，画布比原来高（不是留一大片空白）
+            "popout_fill_height": (
+                bool(pp_zoom.get("fitGrow"))
+                and float(pp_zoom.get("height", 0) or 0) > float(pp_open.get("height", 0) or 0) * 1.3
+                and float(pp_zoom.get("panelH", 0) or 0) >= float(pp_zoom.get("stageH", 0) or 0) * 0.9
+            ),
+            # 全屏：窗口真进了全屏，且面板把整屏高度吃满（不是缩在中间）
+            "popout_fullscreen": bool((report.get("popout_fullscreen") or {}).get("check")),
+            # 窗口外弹窗：新的独立窗口里只有那个面板，且画布真的按窗口尺寸渲染
+            "popout_window": (
+                bool(pp_win.get("solo"))
+                and bool(pp_win.get("panel"))
+                and int((pp_win.get("shot") or {}).get("saved") is True)
+                and any(
+                    float(c.get("h", 0) or 0) > 200 and float(c.get("w", 0) or 0) > 300
+                    for c in (pp_win.get("canvases") or [])
+                )
+            ),
             # 换页也能弹：通用逻辑不依赖频谱页；⤢ 按钮存在
             "popout_any_page": bool((wifi.get("popoutAny") or {}).get("ok"))
             and bool((wifi.get("popoutAny") or {}).get("back"))
@@ -493,7 +641,7 @@ def run_selftest(app: QApplication, view: QWebEngineView, window: HostWindow, ar
             nxt = ORDER[ORDER.index(page_id) + 1 :]
             if page_id == "spectrum":
                 # 频谱页验完顺手验「双击弹出预览」，再验中英切换，然后保持英文继续验后面的页
-                QTimer.singleShot(300, lambda: popout_test(lambda: switch_lang(nxt[0])))
+                QTimer.singleShot(300, lambda: popout_test(lambda: popout_window_test(lambda: popout_fullscreen_test(lambda: switch_lang(nxt[0])))))
             elif nxt:
                 QTimer.singleShot(400, lambda: stage(nxt[0]))
             else:
@@ -521,6 +669,108 @@ def run_selftest(app: QApplication, view: QWebEngineView, window: HostWindow, ar
         report["popout"] = payload
         steps.append(f"弹出预览：{json.dumps({k: payload.get(k) for k in ('open', 'zoom', 'close')}, ensure_ascii=False)}")
         QTimer.singleShot(200, then)
+
+    def popout_window_test(then) -> None:
+        """点「独立窗口」按钮 → Python 侧 createWindow → 新窗口真的渲染出画布。"""
+        view.page().runJavaScript("Popout.openDocked()")
+
+        def read_out() -> None:
+            live = window.live_popouts()
+            if not live:
+                report["popout_window"] = {"ok": False, "windows": len(window.popouts)}
+                steps.append("独立窗口：没开出来")
+                QTimer.singleShot(200, then)
+                return
+            child = live[-1]
+
+            def collect_child(result: object) -> None:
+                try:
+                    payload = json.loads(str(result)) if result else {}
+                except Exception:  # noqa: BLE001
+                    payload = {"parse_error": str(result)}
+                image = child.grab()
+                path = (args.shot or "selftest.png")
+                root, ext = os.path.splitext(path)
+                shot_path = f"{root}-window{ext or '.png'}"
+                payload["shot"] = {"path": shot_path, "saved": bool(image.save(shot_path))}
+                payload["windows"] = len(live)
+                payload["title"] = child.windowTitle()
+                report["popout_window"] = payload
+                steps.append(f"独立窗口：{json.dumps(payload, ensure_ascii=False)}")
+                QTimer.singleShot(200, then)
+
+            child.page().runJavaScript(
+                "JSON.stringify({"
+                " solo: document.body.classList.contains('solo'),"
+                " panel: !!Popout.current,"
+                " key: Popout.current ? Popout.current.dataset.panelKey : '',"
+                " canvases: Array.from(document.querySelectorAll('canvas')).map(c => ({id: c.id || '(3d)', w: c.width, h: c.height})),"
+                " frames: (window.probeReport ? probeReport().framesSeen : -1)"
+                "})",
+                0,
+                collect_child,
+            )
+
+        QTimer.singleShot(2200, read_out)
+
+    def popout_fullscreen_test(then) -> None:
+        """点「全屏」→ 真的进全屏，且面板把整屏高度用满（不是照原样缩在中间）。"""
+        view.page().runJavaScript(
+            "(function () {"
+            " var g = document.querySelector('#page-container [data-fit-grow=\"1\"]');"
+            " var p = g && g.closest('.panel');"
+            " if (!p) return 'no panel';"
+            " Popout.open(p);"
+            " return 'ok';"
+            "})()"
+        )
+
+        def click_full() -> None:
+            view.page().runJavaScript("document.querySelector('.popout [data-act=\"full\"]').click()")
+
+        def read_out() -> None:
+            win = window.view.window()
+
+            def collect(result: object) -> None:
+                try:
+                    payload = json.loads(str(result)) if result else {}
+                except Exception:  # noqa: BLE001
+                    payload = {"parse_error": str(result)}
+                payload["full"] = bool(win.isFullScreen())
+                payload["screenH"] = int(window.view.screen().geometry().height())
+                payload["check"] = bool(win.isFullScreen()) and (
+                    float(payload.get("panelH", 0) or 0) >= float(payload.get("stageH", 0) or 0) * 0.85
+                ) and float(payload.get("stageH", 0) or 0) >= payload["screenH"] * 0.8
+                report["popout_fullscreen"] = payload
+                steps.append(f"全屏：{json.dumps(payload, ensure_ascii=False)}")
+                # 收尾：再点一次「退出全屏」+ 关浮层，后面还要截图
+                view.page().runJavaScript("document.querySelector('.popout [data-act=\"full\"]').click()")
+                QTimer.singleShot(900, leave)
+
+            def leave() -> None:
+                view.page().runJavaScript("if (window.Popout) Popout.close();")
+                QTimer.singleShot(600, then)
+
+            view.page().runJavaScript(
+                "(function () {"
+                " var st = document.querySelector('.popout__stage');"
+                " var pn = document.querySelector('.panel--popped');"
+                " var css = pn ? parseFloat(getComputedStyle(pn).getPropertyValue('--fit-grow')) || 0 : 0;"
+                " return JSON.stringify({"
+                "   stageH: st ? Math.round(st.getBoundingClientRect().height) : 0,"
+                "   panelH: pn ? Math.round(pn.getBoundingClientRect().height) : 0,"
+                "   fitGrow: Math.round(css),"
+                "   innerH: window.innerHeight,"
+                "   label: (document.querySelector('.popout [data-act=\"full\"]') || {}).textContent || '',"
+                "   bridge: !!(window.Bridge && Bridge.ready())"
+                " });"
+                "})()",
+                0,
+                collect,
+            )
+
+        QTimer.singleShot(400, click_full)
+        QTimer.singleShot(1800, read_out)
 
     def switch_lang(next_id: str) -> None:
         view.page().runJavaScript("I18N.setLang('en')")

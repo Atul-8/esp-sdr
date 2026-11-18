@@ -133,11 +133,24 @@ window.U = (function () {
     return Number.isFinite(value) && value > 0 ? value : 1;
   }
 
+  /**
+   * 弹窗里画布要「吃满剩余高度」：面板上设了 --fit-grow（px）且画布标了
+   * data-fit-grow="1" 时，在基础高度之外再加上这段余量。普通页面没有这个变量，
+   * 加上去就是 0，行为和以前完全一样。
+   */
+  function fitGrow(el) {
+    if (!el || !el.dataset || el.dataset.fitGrow !== "1" || !window.getComputedStyle) return 0;
+    const raw = getComputedStyle(el).getPropertyValue("--fit-grow");
+    const value = parseInt(raw, 10);
+    return Number.isFinite(value) && value > 0 ? value : 0;
+  }
+
   function fitCanvas(canvas, cssHeight) {
+    if (!canvas) return { ctx: null, width: 0, height: 0, dpr: 1 };  // 面板被搬走时别炸整段重绘
     const dpr = window.devicePixelRatio || 1;
     const rect = canvas.getBoundingClientRect();
     const width = Math.max(320, Math.round(rect.width || canvas.clientWidth || 640));
-    const height = Math.round((cssHeight || rect.height || 220) * fitScale(canvas));
+    const height = Math.round((cssHeight || rect.height || 220) * fitScale(canvas) + fitGrow(canvas));
     canvas.width = Math.round(width * dpr);
     canvas.height = Math.round(height * dpr);
     canvas.style.height = height + "px";
@@ -150,6 +163,6 @@ window.U = (function () {
     fmtHz, fmtMHz, fmtPct, fmtDb,
     levelClass, levelColor, levelText,
     heat, heatT, heatHex, heatHexT, heatRGB,
-    AutoRange, el, fitCanvas, fitScale,
+    AutoRange, el, fitCanvas, fitScale, fitGrow,
   };
 })();

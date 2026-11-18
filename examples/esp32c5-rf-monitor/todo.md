@@ -18,7 +18,7 @@
 | 3 | `feat/3-ble-risk` | BLE 风险与环境评估 | `[TODO]` |
 | 4 | `feat/4-guard-58g` | 5.8G 频段守卫 | `[TODO]` |
 | 5 | `feat/5-capture` | 可疑信号抓拍（含分类器） | `[TODO]` |
-| T | `feat/host-gui` | 图形上位机（WebView，跨阶段工具，不占功能阶段） | `[REVIEW]` 待人类验收（含双击弹出预览 + 2D 瀑布频率轴） |
+| T | `feat/host-gui` | 图形上位机（WebView，跨阶段工具，不占功能阶段） | `[REVIEW]` 待人类验收（含双击弹出预览 + 高度自适应 + 真全屏 + 独立窗口 + 2D 瀑布频率轴） |
 
 ---
 
@@ -161,7 +161,11 @@ BAND_5_HZ    = (5_170_000_000, 5_835_000_000)   # → 44 个窗：5180…5825，
 - `host/web/js/i18n.js` + `--lang zh|en`：外壳文案中英切换（模块自产表格沿用模块语言）
 - `host/web/js/scanbar.js`：扫频进度条（频段地图 + 回卷游标，数据来自 `info.plans`）
 - `host/web/js/popout.js`：**双击任意面板弹出预览**（铺满窗口 / 75%…300% 自定义缩放 /
-  全屏 / Esc 关闭，原地搬 DOM 不重建 canvas，缩放按新尺寸重画）
+  真全屏 / **独立窗口**（`window.open` → `ConsolePage.createWindow`，可拖到别的显示器、
+  小窗口自己全屏）/ Esc 关闭，原地搬 DOM 不重建 canvas，缩放按新尺寸重画）
+- **弹出后高度自适应**：`--fit-grow` 两阶段量高度（余量 ÷ 标了 `data-fit-grow="1"`
+  的画布个数），`U.fitCanvas()` 高度 = `cssHeight × fitScale + fitGrow()`，
+  3D 容器 = `calc(300px * var(--fit-scale,1) + var(--fit-grow,0px))`
 - `host/web/js/pages/spectrum.js`：2D 瀑布底部**简易频率轴**（轴线 + 5 刻度 + MHz + 中心标亮）
 - `host/tests/test_session.py`：23 条无窗口自测
 - `host/README.md`：跑法、数据契约、**新增实验页的四步**、边界、踩坑表
@@ -171,7 +175,7 @@ BAND_5_HZ    = (5_170_000_000, 5_835_000_000)   # → 44 个窗：5180…5825，
 | 验收项 | 判据 | 结果 |
 | --- | --- | --- |
 | 逻辑层自测 | `cd host && python -m unittest discover -s tests -t tests` 0 失败 | ✅ 23 passed |
-| 无人工自检（假固件） | `python app.py --selftest --seconds 8 --shot out.png` 退出码 0 | ✅ 退出码 0，**18/18 checks** |
+| 无人工自检（假固件） | `python app.py --selftest --seconds 8 --shot out.png` 退出码 0 | ✅ 退出码 0，**21/21 checks** |
 | 频谱页真的在画 | 收到帧 > 0 且 2D/3D 画布非黑比例 > 1% | ✅ 188 帧；spec 24.7% / 3D 10.1% / 2D 瀑布 11.6% |
 | **2D 瀑布真的在滚** | 缓冲行数 240；`paintedRows ≥ 10`、`distinctRows ≥ 0.9×frames`、顶部均值 > 底部 + 100 | ✅ `paintedRows 35 / frames 35 / distinctRows 32 / topMean 291 / bottomMean 33` |
 | **扫频进度条：分段** | 从 `info.plans` 自动切段，至少 2 段、总窗数 > 10 | ✅ `2.4G`（2402–2482，5 窗）+ `5G`（5170–5835，44 窗）= 49 窗 |
@@ -183,17 +187,27 @@ BAND_5_HZ    = (5_170_000_000, 5_835_000_000)   # → 44 个窗：5180…5825，
 | **双击弹出预览（缩放）** | 150% 后画布宽度 > 1.35× 原宽 | ✅ `zoom {1.5, width 2099} = 1.51×`，`--fit-scale 1.5` |
 | **双击弹出预览（关）** | 关闭后浮层不可见、面板回到页面原位 | ✅ `close {overlay false, hidden true, backHome true}` |
 | **换页也能弹** | WiFi 页不写代码也能弹（通用逻辑 + ⤢ 按钮） | ✅ `popoutAny {ok true, themed true, back true}` |
+| **弹出后高度自适应** | 面板高度 ≥ 浮层高度 90%，画布比 100% 时高 1.3 倍以上 | ✅ `stageH 865 / panelH 825`（95%），画布 `210 → 776`，`--fit-grow 461px` |
+| **全屏是真的全屏** | `win.isFullScreen()` 为真，且全屏下面板仍吃满高度 | ✅ `full true`；`stageH 1032 / panelH 993`（96%），`--fit-grow 629`，按钮变「退出全屏」 |
+| **窗口外弹窗** | 新开一个独立窗口，里面只有那块面板、画布按窗口尺寸渲染 | ✅ `popout_window {solo true, panel true, key spectrum:1, windows 1}`；`spec-canvas 1463×858`；截图存活 |
+| **独立窗口自己全屏** | 在小窗口里点全屏 → 小窗口全屏、主窗口不动 | ✅ 探针：`child_full true / main_full false`，`innerW 1707 × innerH 1067`，面板 1008 高，退出后 `false` |
 | WiFi 页真的在判 | 表格行 > 5、推荐信道有值、说明 ≥ 3 条 | ✅ 38 行；推荐 ch11 +17dB 拥挤；4 条说明 |
 | 原始页真的在输出 | 至少 1 个模块面板 + ASCII 文本 > 40 字符 | ✅ 1 面板 / 1 表 / 4364 字符 |
 | 换实验不改 Python | 新页面只加 `web/pages/<id>/page.html` + `registry.json` 一行 | ✅ 三页共用同一个 `app.py`，`router.js` 不认具体页名 |
 | 独立目录 | 上位机放项目根 `host/`，不依赖 `repo/` 的相对位置 | ✅ `paths.find_source()` 解析到 `…
 epo\examples\esp32c5-rf-monitor`；`ESPSDR_SRC=/tmp` 正确抛错 |
-| 真板可跑 | `--selftest --real --port COM56` 退出码 0 | ✅ 117 帧 / **18 checks 全绿**；弹出预览 `open 1391 → 2099 → 关闭复位`；轴 `5230–5250 MHz` |
+| 真板可跑 | `--selftest --real --port COM56` 退出码 0 | ✅ 331 帧 / **21 checks 全绿**；弹出 `open 1391 → 2099 → 关闭复位`；全屏 `1032/993`；独立窗口 `spec-canvas 1463×858` |
 | 边界一致 | 界面上「功率码不是 dBm」「周期快照」「固定增益才可比」 | ✅ 纵轴/提示/说明页脚都写了 |
 
 未覆盖（必须诚实标注）：
 
 - **只在 Windows + Qt 6.12 上验过**；Linux/macOS 没测。
+- 「独立窗口」是**同一进程**里的第二个 `QWebEngineView`（共用同一个 `Bridge`），
+  不是新进程；主窗口退出时一起关闭，不能单独留一个小窗口活着。
+- 独立窗口的 `?solo=<页面:序号>` 里的序号是**面板在页面里的出现顺序**，页面动态
+  插拔面板后序号会变——只影响「已开着的旧窗口」重载，重新打开就好。
+- 全屏靠 Python 侧 `showFullScreen()`（合成点击没有用户手势，DOM Fullscreen 会被拒）；
+  只有纯浏览器打开网页时才会退化成 `popout--max`（铺满窗口）。
 - 3D 视图**没有自动对比度/色标校准**，只是同一色带映射；不做定量判读。
 - 页面刷新率受采集线程节流（20fps），**不是**固件原始帧率。
 - 扫频进度条的**段名**（2.4G / 5G）是前端按频率猜的纯装饰标签，判据全部来自

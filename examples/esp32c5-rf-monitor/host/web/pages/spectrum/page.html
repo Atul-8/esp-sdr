@@ -16,7 +16,7 @@
     </span>
   </div>
   <div class="panel__body">
-    <canvas id="spec-canvas" class="plot" height="210"></canvas>
+    <canvas id="spec-canvas" class="plot" height="210" data-fit-grow="1"></canvas>
   </div>
 </div>
 
@@ -25,7 +25,7 @@
     <span class="panel__title" data-i18n="spectrum.wf3d.title">3D 瀑布</span>
     <span class="panel__hint" data-i18n="spectrum.wf3d.hint">越靠前越新；高度 = 功率码；鼠标左键旋转 / 滚轮缩放</span>
   </div>
-  <div class="panel__body" id="wf-3d" style="height: calc(300px * var(--fit-scale, 1));"></div>
+  <div class="panel__body" id="wf-3d" data-fit-grow="1" style="height: calc(300px * var(--fit-scale, 1) + var(--fit-grow, 0px));"></div>
 </div>
 
 <div class="panel">
@@ -34,6 +34,6 @@
     <span class="panel__hint" data-i18n="spectrum.wf2d.hint">每帧一行，自上而下变旧；对比度按本帧动态范围自动拉伸</span>
   </div>
   <div class="panel__body">
-    <canvas id="wf-canvas" class="plot" height="150"></canvas>
+    <canvas id="wf-canvas" class="plot" height="150" data-fit-grow="1"></canvas>
   </div>
 </div>

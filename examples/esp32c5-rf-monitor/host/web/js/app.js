@@ -44,7 +44,9 @@
 
     // ---- 导航 + 首屏 ----
     await Router.init();
-    await Router.navigate("spectrum");
+    // 独立小窗口（窗口外弹窗）：只显示被点出来的那一个面板
+    const solo = soloParam();
+    await Router.navigate(solo ? solo.page : "spectrum");
 
     // ---- 桥就绪后拉一次本机串口/场景清单 ----
     Bridge.init(async () => {
@@ -53,6 +55,7 @@
       await loadScenarios();
       bindControls();
       await syncRuntime();
+      if (solo) await openSoloPanel(solo);
       log({ text: T("log.ready") });
     });
 
@@ -61,6 +64,27 @@
         if (!Bridge.ready()) log({ level: "err", text: T("log.noChannel") });
       }, 1500);
     }
+  }
+
+  /** URL 里的 ?solo=<pageId>:<序号> —— Python 侧 createWindow 开的就是这个页面 */
+  function soloParam() {
+    let raw = "";
+    try {
+      raw = new URLSearchParams(window.location.search).get("solo") || "";
+    } catch (err) {
+      raw = "";
+    }
+    if (!raw) return null;
+    const at = raw.lastIndexOf(":");
+    return { page: at > 0 ? raw.slice(0, at) : raw, key: raw };
+  }
+
+  async function openSoloPanel(solo) {
+    // querySelector 需要等 Router 把片段 inject 完；navigate 是 await 过的，这里再兜一层
+    if (!Popout.openSolo(solo.key)) {
+      setTimeout(() => Popout.openSolo(solo.key), 300);
+    }
+    document.title = (Router.current ? (I18N.entry("title", Router.current.entry) || solo.page) : solo.page) + " · esp-sdr";
   }
 
   // ---- 语言 -------------------------------------------------------------
@@ -97,6 +121,9 @@
     if (!rt) return;
     if (rt.info) onInfo(rt.info, true);
     if (rt.stats) onStats(rt.stats);
+    // 独立窗口是「晚连上」的：把最后一帧频谱 / 最后一次表格直接回放给它
+    if (rt.spectrum) Router.dispatch("Spectrum", rt.spectrum);
+    if (rt.tables) Router.dispatch("Tables", rt.tables);
     if (rt.running) {
       setStatus("running", "status.running");
       setRunning(true);

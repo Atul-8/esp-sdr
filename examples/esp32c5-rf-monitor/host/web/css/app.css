@@ -182,6 +182,11 @@ canvas.plot { display: block; width: 100%; border-radius: 8px; background: #070a
 .popout--max { background: #04080e; }
 
 .btn--mini { padding: 2px 8px; font-size: 12px; }
+/* 独立小窗口（?solo=页面:序号）：只剩那一个面板，外壳全部隐藏 */
+body.solo .top, body.solo .side, body.solo .foot { display: none; }
+body.solo { grid-template-areas: "page"; grid-template-columns: 1fr; grid-template-rows: 1fr; }
+.popout--solo { background: var(--bg); }
+.popout--solo .popout__title { font-weight: 500; }
 
 /* ── 页脚：KV + 日志 ────────────────────────────────── */
 .foot {

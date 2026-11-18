@@ -22,7 +22,7 @@ host/
     │   ├── util.js    # 单位格式化 + 分档配色 + 热力色带 + 画布适配
     │   ├── three3d.js # 3D 瀑布曲面 / 3D 信道柱状图
     │   ├── router.js  # 按 registry.json 加载片段（XHR，QWebEngine 不支持 file:// 的 fetch）
-    │   ├── popout.js  # 双击任意面板 → 全窗口预览 + 自定义缩放
+    │   ├── popout.js  # 双击任意面板 → 全窗口预览 + 自定义缩放 + 全屏 + 独立窗口
     │   ├── scanbar.js # 扫频进度条（2.4G/5G 频段地图 + 回卷游标）
     │   ├── i18n.js    # 中英切换（只翻外壳 + 结构化数据）
     │   ├── app.js     # 外壳装配 + 事件路由 + 自检探针 window.probeReport()
@@ -48,7 +48,7 @@ python host/app.py --mock --scenario wifi_busy
 # 3) 无人工干预自检（跑 8s → 切三个页面截图 → 打印 JSON 报告 → 退出码 0/2）
 python host/app.py --selftest --seconds 8 --shot out.png
 python host/app.py --selftest --real --port COM56 --gain-index 60 --seconds 12
-#    → 报告末尾 "checks": 18 项全 true，退出码 0（假固件与真板都验过）
+#    → 报告末尾 "checks": 21 项全 true，退出码 0（假固件与真板都验过）
 
 # 逻辑层自测（不开窗口）
 python -m unittest discover -s host/tests -t . -v
@@ -99,8 +99,8 @@ Windows 上也可以双击 `host/start.bat`（缺依赖会自动 `pip install`�
 所以两个入口都给）。工具栏能做的事：
 
 - `−` / `+`：**自定义缩放**，75% → 100% → 125% → 150% → 200% → 300%（12 档太密，
-  按这 6 档走）；`重置` 回 100%；`全屏` 调浏览器 Fullscreen API（QWebEngine 需要
-  宿主 accept，失败就退回「铺满窗口」，不会卡在黑白屏）；`✕`/`Esc` 关闭。
+  按这 6 档走）；`重置` 回 100%；`独立窗口` 把这块面板丢到**另一个窗口**里
+  （见下节）；`全屏` / `退出全屏` 见下；`✕`/`Esc` 关闭。
 - 浮层是**同一文档内的 fixed 覆盖层 + 原地搬 DOM**，不是 `window.open`：
   canvas / WebGL 上下文跟着 DOM 走，搬进搬出都不丢内容，也不用给 Python 侧再加
   一个窗口和桥。
@@ -115,6 +115,46 @@ Windows 上也可以双击 `host/start.bat`（缺依赖会自动 `pip install`�
 
 新实验页不用写任何代码就有这个功能——`Popout.attach(#page-container)` 是委托到
 `.panel` 上的，按钮也是自动加的（`MutationObserver` 兜住运行时新插入的面板）。
+
+### 弹出后高度自适应（别留一大片空白）
+
+弹出来只是「变宽」不够，2D 瀑布那种固定 `150px` 高的画布放大后下面全是空白。
+现在的做法是**两阶段量高度**：
+
+1. 面板上 `--fit-grow` 归零 → 派发一次 `resize`，页面按倍率把画布重画成「自然高度」；
+2. 260ms 后量 `浮层可用高度 − 面板实际高度`，把这段余量除以面板里标了
+   `data-fit-grow="1"` 的个数，写进 `--fit-grow`，再派发一次 `resize`。
+
+`U.fitCanvas()` 里的高度 = `cssHeight × fitScale + fitGrow()`，3D 容器高度 =
+`calc(300px * var(--fit-scale, 1) + var(--fit-grow, 0px))`。窗口被拉大/全屏时
+（Python 侧 `showFullScreen()` 也会触发真正的 `resize`）会重新走一遍这个流程；
+自己派发的合成 `resize` 用一个 `suppress` 计数屏蔽，不会自我递归。
+
+实测：普通窗口浮层 stage 865px / 面板 825px（95%），全屏 stage 1032 / 面板 993（96%）。
+
+### 全屏为什么不走 `requestFullscreen()`
+
+自动化（`element.click()`）和脚本触发的全屏**没有用户手势**，Chromium 直接拒，
+表现就是「点了全屏没反应、布局跟普通一模一样」——真机第一次就是这么翻车的。
+现在 `全屏` 按钮调 `Bridge.call("setFullscreen", {"on":..,"target":"main"|"popout"})`，
+由 Python 侧 `win.showFullScreen()/showNormal()` 做，不需要手势；纯浏览器打开网页
+（没有 QWebChannel）时才退回 DOM Fullscreen API，再不行退化成「铺满窗口」。
+
+### 窗口外弹窗（`独立窗口`）
+
+`Popout.openDocked()` → `window.open('index.html?solo=<页面:序号>')`，Python 侧
+`ConsolePage.createWindow()` 接住并返回一个新页：
+
+- 新窗口是**真正的窗口**（`QWebEngineView` 顶层窗口，可拖到别的显示器、可自己全屏）；
+- 加载的还是同一套 `web/index.html`，只是带 `?solo=` 参数，网页自己
+  `body.solo` 隐藏外壳、只把那一个面板铺满（隐藏「关闭」和「独立窗口」按钮）；
+- **共用同一个 `Bridge`**：`QWebChannel` 是每个页面一个，但注册的是同一个
+  `backend`，所以信号天然广播给所有窗口；晚连上的窗口靠 `runtime()` 里带回的
+  最后一帧 `spectrum`/`tables` 立刻有画面（`HostWindow._cache_spectrum`）；
+- 主窗口关掉时一起关掉（`HostWindow.shutdown()`）；浮层挂进 `#page-container`
+  而不是 `body`，是为了让被搬走的面板仍然是页面 `root` 的后代
+  （否则页面 resize 钩子 `root.querySelector("#spec-canvas")` 拿到 `null` 直接抛错，
+  画面停止重绘——这个坑现场踩过）。
 
 ## 2D 瀑布的频率轴
 
@@ -141,10 +181,16 @@ Windows 上也可以双击 `host/start.bat`（缺依赖会自动 `pip install`�
 
 页面里 `probe()` 额外回给自检的键（不影响运行）：`frames`、`scanbar`、
 `wf2d`（含 `paintedRows/distinctRows/topMean/bottomMean`）、`wf2dAxis`
-（`{lo, hi, center, ticks}`，单位 MHz）。
+（`{lo, hi, center, ticks}`，单位 MHz）、`three`。
 
-JS → Python 只有四个入口：`listPorts()`、`scenarios()`、`renderText()`、
-`start(configJson)` / `stop()`（都在 `bridge.js` 里封装成 Promise）。
+自检另外收两路只有宿主才看得见的证据：`Popout.selftest()`（浮层开 / 1.5× 缩放 /
+归位、`--fit-grow`、面板高度 vs 浮层高度）与 Python 侧 `popout_window`（独立窗口
+里真有画布、窗口标题、截图）、`popout_fullscreen`（`win.isFullScreen()` 为真、
+全屏下面板仍吃满高度）。这三项是「弹出预览 + 窗口外弹窗」的验收凭据。
+
+JS → Python 的入口：`listPorts()`、`scenarios()`、`renderText()`、
+`start(configJson)` / `stop()`、`setFullscreen({on,target})`、`uiDefaults()`、
+`runtime()`、`uiReport(json)`（都在 `bridge.js` 里封装成 Promise）。
 
 ## 边界（和 CLI 输出同一套口径，界面不许美化）
 
@@ -167,4 +213,7 @@ JS → Python 只有四个入口：`listPorts()`、`scenarios()`、`renderText()
 | 扫频进度条上没有游标 / 显示「等待扫描计划」 | `info` 是开流后才到，页面 `onEnter` 时还没有 `plans` | `app.js` 把 `info` 也 `Router.dispatch("Info", …)`，页面 `onInfo` 里补 `applyPlan()` |
 | 弹出预览一把静态文案全翻回默认值（`#raw-text` 的 ASCII 被清成「未连接」） | `Popout` 里为了翻按钮标题调了 `I18N.apply(整个面板)`，把 `data-i18n` 占位的**动态内容**一起重写了 | 只 `I18N.apply(工具栏)` + 逐个设按钮 `title`，绝不 apply 面板 |
 | 关闭浮层后面板还在浮层里 / 打不开第二次 | 浮层元素只是 `hidden`，探针按「元素存在」判断成没关 | 判据改成 `.popout:not([hidden])` 与 `overlay.hidden`；关闭时把面板 `insertBefore` 回原位 |
+| 弹出/放大后画布高度一点没变，下面一大片空白 | 页面 resize 钩子用 `root.querySelector("#spec-canvas")`，面板被搬到 `body` 下的浮层后就不在 `root` 里了 → 拿到 `null` 抛 `TypeError`，整段重绘中断 | 浮层挂到 `#page-container` 内（`position: fixed`，视觉不变），`fitCanvas(null)` 也返回空对象不再抛错 |
+| 点「全屏」没反应，布局跟普通窗口一模一样 | 合成点击没有用户手势，Chromium 拒 `requestFullscreen()`（`QtWebEngine` 的 `fullScreenRequested` 压根没触发） | 全屏走 `Bridge.setFullscreen` → Python `win.showFullScreen()`；DOM API 只作纯浏览器兜底 |
+| 独立窗口里画面空白/不刷新 | 新窗口晚连上，`QWebChannel` 之前的信号全丢了 | `runtime()` 带回最后 `spectrum`/`tables`，`syncRuntime()` 直接回放；`HostWindow` 缓存两份 JSON |
 | 网页报错查不到 | 默认不打印前端 console | `ConsolePage.javaScriptConsoleMessage` 转发到 stdout（`[js:err] 文件:行 消息`） |
