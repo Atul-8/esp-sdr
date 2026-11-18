@@ -28,6 +28,13 @@
     "hint_en": "advertising channels"
   },
   {
+    "id": "capture",
+    "title": "可疑信号抓拍",
+    "hint": "IQ 存证 + 过滤计数",
+    "title_en": "Signal capture",
+    "hint_en": "IQ evidence + gate counters"
+  },
+  {
     "id": "raw",
     "title": "原始输出",
     "hint": "任意模块表格兜底",

@@ -130,6 +130,18 @@ class Bridge(QObject):
         return to_json(self._window.runtime())
 
     @Slot(result=str)
+    def audit(self) -> str:  # noqa: N802 - JS 侧用同名
+        """一键体检：把当前会话已扫到的数据汇成「活跃发射源清单 + 结论」。
+
+        **只读**：不重新跑扫描、不新抓档。界面上的措辞必须保留四条边界
+        （分时快照 / 相对码 / 启发式 / 「未发现」≠「安全」）。
+        """
+        session = self._window.session
+        if session is None:
+            return to_json({"kind": "anti_peep_audit", "ok": False, "headline": "还没有会话", "why": "先点「开始」", "sources": [], "captures": [], "boundaries": []})
+        return to_json(session.audit())
+
+    @Slot(result=str)
     def scenarios(self) -> str:
         from tests.mock_source import SCENARIOS
 
@@ -673,6 +685,19 @@ def run_selftest(app: QApplication, view: QWebEngineView, window: HostWindow, ar
             sweep: (((document.querySelector('#wf-sweep-s')||{}).textContent) || ''),
             sweepNote: (((document.querySelector('#wf-sweep-note')||{}).textContent) || '')
         })""",
+        "capture": """JSON.stringify({
+            rows: document.querySelectorAll('#cap-rows tr').length,
+            filters: document.querySelectorAll('#cap-filter-rows tr').length,
+            spurs: document.querySelectorAll('#cap-spur-rows tr').length,
+            thresholds: document.querySelectorAll('#cap-th-rows tr').length,
+            notes: document.querySelectorAll('#cap-notes li').length,
+            warn: (((document.querySelector('#cap-warn')||{}).textContent) || '').length,
+            records: (((document.querySelector('#cap-records')||{}).textContent) || ''),
+            audit: (((document.querySelector('#cap-audit-headline')||{}).textContent) || ''),
+            auditRows: document.querySelectorAll('#cap-audit-rows tr').length,
+            auditBoundary: document.querySelectorAll('#cap-audit-boundary li').length,
+            probe: (window.Pages.capture ? Pages.capture.probe() : null)
+        })""",
         "raw": """JSON.stringify({
             panels: document.querySelectorAll('#raw-tables .panel').length,
             tables: document.querySelectorAll('#raw-tables table').length,
@@ -686,6 +711,7 @@ def run_selftest(app: QApplication, view: QWebEngineView, window: HostWindow, ar
         wifi = pages.get("wifi", {}) if isinstance(pages, dict) else {}
         raw = pages.get("raw", {}) if isinstance(pages, dict) else {}
         ble_page = pages.get("ble", {}) if isinstance(pages, dict) else {}
+        cap_page = pages.get("capture", {}) if isinstance(pages, dict) else {}
         wf_page = pages.get("waterfall", {}) if isinstance(pages, dict) else {}
         wf_page_probe = (wf_page.get("probe") or {}) if isinstance(wf_page, dict) else {}
         canvases = spectrum.get("canvases", []) if isinstance(spectrum, dict) else []
@@ -800,6 +826,23 @@ def run_selftest(app: QApplication, view: QWebEngineView, window: HostWindow, ar
             "ble_hints": int(ble_page.get("hints", 0) or 0) >= 1,
             "ble_notes": int(ble_page.get("notes", 0) or 0) >= 3,
             "ble_bars3d": bool((ble_page.get("probe") or {}).get("bars3d")),
+            # 抓拍页：门槛表真的从模块下发、过滤计数真的在渲染、边界声明不空
+            "capture_page": (
+                int(cap_page.get("rows", 0) or 0) >= 1
+                and int(cap_page.get("filters", 0) or 0) >= 7
+                and int(cap_page.get("thresholds", 0) or 0) >= 10
+                and int(cap_page.get("notes", 0) or 0) >= 3
+                and int(cap_page.get("warn", 0) or 0) > 30
+                and str((cap_page.get("probe") or {}).get("kind", "")) == "capture"
+                and float((cap_page.get("probe") or {}).get("span", 0) or 0) > 0
+            ),
+            # 一键体检接口：Bridge.audit → app.audit.summary → 表格 + 四条边界
+            "capture_audit": int(cap_page.get("auditRows", 0) or 0) >= 1
+            and int(cap_page.get("auditBoundary", 0) or 0) == 4
+            and len(str(cap_page.get("audit", ""))) > 4,
+            # 抓档链路真的接上了（模块拿到 capture_fn + 存档目录）
+            "capture_wired": bool(window.session is not None and window.session.capture_plugins)
+            and bool(str(window.session.capture_dir)),
             # 增益控件：手动→升档→自动 一路走通，且顶栏读数是 Python 回推的
             "gain_manual": str((report.get("gain") or {}).get("index0", "")) != "",
             "gain_step": bool(report.get("gain"))
@@ -817,8 +860,11 @@ def run_selftest(app: QApplication, view: QWebEngineView, window: HostWindow, ar
             "waterfall_banner": int(wf_page.get("banner", 0) or 0) > 20,
             "waterfall_notes": int(wf_page_probe.get("notes", 0) or 0) >= 3,
             "waterfall_sweep": str(wf_page.get("sweep", "")).endswith(" s"),
-            # 单射频分时：瀑布图必须真拿到射频时间，不能被 wifi_check 饿死
-            "waterfall_share": float(share.get("waterfall", 0) or 0) >= 0.3,
+            # 单射频分时：瀑布图必须真拿到射频时间，不能被别的模块饿死。
+            # 门槛按 META-0087 的五模块公平分摊算：5 个模块各 weight 1.0 → 各 ~20%，
+            # 所以「没被饿死」= ≥15%（写死 0.3 是四模块时代的遗留，2026-11 抓拍上线后假红）。
+            "waterfall_share": float(share.get("waterfall", 0) or 0) >= 0.15
+            and float(share.get("capture", 0) or 0) >= 0.15,
             "waterfall_render": bool((report.get("waterfall_render") or {}).get("open"))
             and len(str((report.get("waterfall_render") or {}).get("files", ""))) > 10,
         }
@@ -1099,7 +1145,7 @@ def run_selftest(app: QApplication, view: QWebEngineView, window: HostWindow, ar
 
         QTimer.singleShot(700, probe_lang)
 
-    ORDER = ["spectrum", "waterfall", "wifi", "ble", "raw"]
+    ORDER = ["spectrum", "waterfall", "wifi", "ble", "capture", "raw"]
 
     def start_after_load() -> None:
         if not window.page_loaded:

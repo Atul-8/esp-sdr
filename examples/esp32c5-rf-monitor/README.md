@@ -17,18 +17,23 @@ examples/esp32c5-rf-monitor/
 │   ├── scheduler.py      #   平滑加权轮转：按 slice_weight 分时间片
 │   ├── store.py          #   SQLite 主存档 + CSV 旁路双写
 │   ├── registry.py       #   ModePlugin 契约 + modes/ 自动发现
-│   └── classifier.py     #   启发式分类器接口（任务 5 才实现）
+│   └── classifier.py     #   启发式分类器（任务 5：先判分不分得清，再判像哪一类）
 ├── modes/                # 五个功能各占一个文件（功能分支各自添加）
 │   ├── wifi_check.py     #   任务 1：WiFi 信道体检（20 MHz 窗 / 15 MHz 步进重叠滑扫）
 │   ├── waterfall.py      #   任务 2：三频段轮扫 + 环形缓冲 + produce()
 │   ├── ble_risk.py       #   任务 3：BLE 广播信道风险评估（六档判词 + 证据链）
-│   └── guard_58g.py      #   任务 4：5.8G 频段守卫（持续发射源 + 告警日志 + 落事件）
+│   ├── guard_58g.py      #   任务 4：5.8G 频段守卫（持续发射源 + 告警日志 + 落事件）
+│   └── capture.py        #   任务 5：可疑信号抓拍（6 窗常驻缓冲 + 四道过滤 + CAP20 存证）
 ├── output/               # 输出基础件（表格/单位格式化），各功能再自带实现
 │   ├── format.py         #   表格/单位格式化
 │   ├── png.py            #   零依赖 PNG 编码器 + 5×7 点阵（任务 2）
 │   └── heatmap.py        #   时频热力图 PNG + HTML 翻页（任务 2）
-├── tests/                # mock 快照源 + 假固件 + 无硬件自测
+├── tests/                # mock 快照源（9 场景）+ 假固件 + 无硬件自测
+├── testing/              # 手工实测/自证脚本（不进单测）：
+│                         #   guard_replay（往真板数据注入图传）/ capture_real（真板抓档）
+│                         #   scenario_matrix（9 场景 × 4 模块）/ capture_replay（判据回放 7 例）
 ├── app/                  # demo（mock 全链路）/ live（真机·假固件）/ waterfall（瀑布图 CLI）
+│                         # capture_link（抓档只在两次扫描之间落地）/ audit（一分钟体检报告）
 ├── host/                 # 图形上位机（PySide6 + WebView）：换实验只换网页
 ├── docs/                 # 阶段说明、任务书副本、验收记录
 └── todo.md               # 唯一任务事实源
@@ -50,6 +55,15 @@ python -m app.demo --scenario video_58g --duration 14   # mock：5728–5752 宽
 #   真板：python -m app.live --port COM56 --duration 45 --gain-index 60 --db .data/guard.db
 python testing/guard_replay.py --db .data/guard.db      # 回放注入自证：往真板数据里塞一个图传
 
+# 任务 5：可疑信号抓拍（分类 → 抓档 → 落 I/Q + sidecar）
+python -m app.demo --scenario unknown_cw_clean --duration 12   # 干净环境里一个窄带持续源
+#   产出：抓档清单（频点/样本/位宽/分类/置信度/存档路径）+ 四道过滤计数
+python -m testing.capture_replay                               # 判据自证：7 个用例过四道门
+python -m testing.scenario_matrix                              # 9 场景矩阵（含 5.8G 共享/单跑双列）
+python -m app.audit --mock --scenario mixed --duration 30      # 体检报告（真板去掉 --mock）
+#   真板：python -m app.audit --port COM56 --duration 60 --gain-index 60 --db .data/audit/real.db
+#   边界：「已存证」≠「确认是摄像头」；杂散只报清单不抓；抓档只收 unknown
+
 # 任务 2：周期性频谱瀑布图（10 分钟等效 mock 数据 → PNG + HTML 翻页）
 python -m app.waterfall --minutes 10 --scenario mixed --ascii
 #   产物：.data/waterfall/index.html + waterfall-pN.png/html
@@ -69,8 +83,10 @@ python host/app.py --port COM56 --gain-index 60          # 真板
 python host/app.py --selftest --seconds 8 --shot out.png # 自动自检（退出码 0/2）
 ```
 
-四个页面：实时频谱（2D 曲线 + 3D 瀑布 + 2D 瀑布）、周期瀑布图（全频段时频
+六个页面：实时频谱（2D 曲线 + 3D 瀑布 + 2D 瀑布）、周期瀑布图（全频段时频
 热力图 + 一键出 PNG/HTML）、WiFi 信道体检（排序表 + 3D 柱状图 + 推荐）、
+BLE 风险评估（判定卡 + 证据链 + 3D 信道柱）、可疑信号抓拍
+（存证清单 + 四道过滤计数 + 本机杂散清单 + 门槛表 + **一键体检**）、
 原始输出（任意模块表格兜底 + CLI 同款 ASCII）。
 细节与「怎么加新实验页」见 `host/README.md`。
 
@@ -97,5 +113,6 @@ C5 的 Serial/JTAG 口和 UART0 都能跑频谱，`SPECINFO?` 会告诉你当前
 
 ## 阶段状态
 
-见 `todo.md`。阶段 0（地基）已完成，等人类验收；功能分支
-`feat/1-wifi-check` … `feat/5-capture` 尚未开始（STOP 门禁）。
+见 `todo.md`。阶段 0（地基）与功能 1~5、T（图形上位机）**都已交验收材料**，
+统一在 `[REVIEW]` 等人类回「确认完成」；当前全量自测 **271 条 OK**，
+上位机自检（假固件）40+ 项 checks 全绿。

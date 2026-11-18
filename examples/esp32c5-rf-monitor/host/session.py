@@ -31,6 +31,13 @@ from core.snapshot import Snapshot  # noqa: E402
 from tests.fake_firmware import FakeFirmware  # noqa: E402
 from tests.mock_modes import ProbePlugin  # noqa: E402
 from tests.mock_source import SCENARIOS  # noqa: E402
+from app import bind_capture  # noqa: E402
+from app.capture_link import (  # noqa: E402
+    CaptureAwareSource,
+    iter_capture_plugins,
+    profile_for,
+    synthetic_capture,
+)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_DIR = os.path.join(SRC_DIR, ".data")
@@ -232,6 +239,10 @@ class HostSession:
     gain: GainControl = field(init=False, default_factory=GainControl)
     #: 每个快照的回调（GUI 用它推频谱；``step()`` 每次可换）
     on_snapshot_cb: Any = field(init=False, default=None, repr=False)
+    #: 支持抓档的模块 + 落盘目录 + 最近抓档日志（任务 5）
+    capture_plugins: list[Any] = field(init=False, default_factory=list)
+    capture_dir: str = field(init=False, default="")
+    capture_log: list[str] = field(init=False, default_factory=list)
 
     def __post_init__(self) -> None:
         self.registry, self.notes = build_registry()
@@ -279,9 +290,27 @@ class HostSession:
 
             self.store = Store(config.store_path)
         self.last_run_stats = None
+        # 抓档（任务 5）：把「真抓」函数交给有 capture_fn 槽的模块，再包一层 Source
+        # 让抓档只在两次扫描之间落地（跟增益同一条纪律，理由见 app/capture_link.py）。
+        source: Any = GainAwareSource(self.link, self.gain)
+        self.capture_plugins = iter_capture_plugins(self.registry)
+        self.capture_dir = ""
+        if self.capture_plugins:
+            capture_fn: Any
+            if config.mock:
+                # mock 下按场景挑假抓档长相：CW 场景给纯单音、图传/微波炉给平谱、
+                # 间歇场景给半段载波 —— 这样存档的 IQ 文件本身带着场景特征，能回放验证。
+                profile = profile_for(config.scenario)
+                capture_fn = lambda f, n, r, b: synthetic_capture(f, n, r, b, profile=profile)  # noqa: E731
+            else:
+                capture_fn = self._link_capture
+            base_dir = os.path.dirname(config.store_path) if config.store_path else DEFAULT_DIR
+            self.capture_dir = os.path.join(base_dir or DEFAULT_DIR, "capture")
+            bind_capture(self.registry, capture_fn, out_dir=self.capture_dir)
+            source = CaptureAwareSource(source, self.capture_plugins, capture_fn, logger=self._log_capture)
         self.scheduler = Scheduler(
             # 包一层：增益变更只在两次扫描之间落地（扫描中途插 GAIN 会把串口读缓冲打乱）
-            GainAwareSource(self.link, self.gain),
+            source,
             self.registry,
             store=self.store,
             on_snapshot=self._dispatch_snapshot,
@@ -312,6 +341,17 @@ class HostSession:
         self.scheduler = None
         self.store = None
 
+    # ---- 抓档 ------------------------------------------------------------
+    def _link_capture(self, freq_hz: int, samples: int, rate_code: int, bits: int) -> Any:
+        """真机抓档：把模块给的 ``(freq, samples, rate, bits)`` 转成 ``link.capture_iq`` 的参数顺序。"""
+        if self.link is None:
+            raise RuntimeError("链路已关闭")
+        return self.link.capture_iq(samples=samples, rate_code=rate_code, bits=bits, freq_hz=freq_hz)
+
+    def _log_capture(self, message: str) -> None:
+        self.capture_log.append(message)
+        del self.capture_log[: max(0, len(self.capture_log) - 40)]
+
     # ---- 增益 ------------------------------------------------------------
     def gain_state(self) -> dict[str, Any]:
         return self.gain.state()
@@ -337,6 +377,24 @@ class HostSession:
         except (TypeError, ValueError) as exc:
             return {"kind": "gain", "ok": False, "note": f"参数不合法：{exc}"}
         return self.gain.state(message=f"未知操作：{action or '（空）'}")
+
+    # ---- 一键体检（只读当前状态） ----------------------------------------
+    def audit(self) -> dict[str, Any]:
+        """把「活跃发射源清单 + 已存证抓拍」汇成一句结论给界面。
+
+        与 ``python -m app.audit`` 用同一套判据（``app.audit.summary``），
+        区别是：界面版**只读当前会话已经扫到的数据**，不重新跑一分钟、不新抓档。
+        所以 ``done`` 永远是 False —— 界面不许把它当成「完整一轮体检报告」。
+        """
+        from app.audit import summary
+
+        try:
+            payload = summary(self.registry)
+        except Exception as exc:  # noqa: BLE001 - 体检炸了不能让界面崩
+            return {"kind": "anti_peep_audit", "headline": "体检失败", "why": f"{type(exc).__name__}: {exc}", "sources": [], "captures": [], "boundaries": [], "ok": False}
+        payload["ok"] = True
+        payload["dir"] = self.capture_dir
+        return payload
 
     # ---- 驱动 ------------------------------------------------------------
     def _dispatch_snapshot(self, snap: Snapshot) -> None:
