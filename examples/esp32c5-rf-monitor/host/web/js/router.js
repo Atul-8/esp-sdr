@@ -61,8 +61,11 @@ window.Router = (function () {
 
   async function navigate(pageId) {
     const entry = registry.find((p) => p.id === pageId) || { id: pageId, title: pageId };
-    // 浮层里那个面板属于上一页的 DOM，切页前必须放回去，否则会被 innerHTML 一起清掉
-    if (window.Popout) Popout.close();
+    // 浮层里那个面板属于上一页的 DOM，切页前先安顿好它：
+    //   · 汇总型（判读/门槛表/体检结论）→ 直接关掉
+    //   · 实时流 → 不关，留在浮层里暂停 + 提示「模式已切换」，切回来继续刷新
+    // 另外无论哪种都要把浮层**摘下来**，否则会被下面的 innerHTML 一起清掉。
+    if (window.Popout) Popout.beforePageChange(pageId);
     if (current && current.mod && current.mod.onLeave) {
       try { current.mod.onLeave(); } catch (err) { console.error(err); }
     }
@@ -82,7 +85,18 @@ window.Router = (function () {
       try { mod.onEnter(host); } catch (err) { console.error("[page]", pageId, err); }
     }
     // 双击弹出：任何页面的任何 .panel 都通用（新实验页不用写代码）
-    if (window.Popout) Popout.attach(host);
+    if (window.Popout) {
+      Popout.attach(host);
+      Popout.afterPageChange(pageId);
+    }
+    // 告诉 Python 侧「我现在停在这一页」：射频线程只算这一页要的模块
+    // （前端不显示的页不该占 CPU、也不该抢射频时间片；见 host/app.py PAGE_MODULES）
+    if (window.Bridge && Bridge.ready()) {
+      try {
+        Bridge.call("setView", JSON.stringify({ page: pageId, win: window.__winTag || "main" }))
+          .catch(() => {});
+      } catch (err) { /* 老版本没有这个槽，忽略 */ }
+    }
   }
 
   /** 把桥事件转给当前页（页面只实现自己关心的那几个） */

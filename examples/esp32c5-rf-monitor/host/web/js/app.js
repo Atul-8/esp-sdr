@@ -80,7 +80,12 @@
     return { page: at > 0 ? raw.slice(0, at) : raw, key: raw };
   }
 
+  // 本窗口的标签：主窗口 = main，独立小窗口 = solo:<page>:<序号>。
+  // 页面门控（Bridge.setView）靠它区分窗口，多窗口各停一页时取并集。
+  window.__winTag = "main";
+
   async function openSoloPanel(solo) {
+    window.__winTag = "solo:" + solo.key;
     // querySelector 需要等 Router 把片段 inject 完；navigate 是 await 过的，这里再兜一层
     if (!Popout.openSolo(solo.key)) {
       setTimeout(() => Popout.openSolo(solo.key), 300);

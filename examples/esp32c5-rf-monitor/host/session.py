@@ -434,10 +434,19 @@ class HostSession:
             "bins": [round(v, 1) for v in bins],
         }
 
-    def tables(self) -> dict[str, Any]:
-        """所有模块的产出物 → 前端 JSON；模块自带 ``web_payload()`` 时一并带上。"""
+    def tables(self, modules: Iterable[str] | None = None) -> dict[str, Any]:
+        """模块产出物 → 前端 JSON；模块自带 ``web_payload()`` 时一并带上。
+
+        ``modules`` 给定时**只算这些模块**（页面门控：切到 WiFi 页就只算
+        ``wifi_check``，不动瀑布/守卫/抓档的表格与 payload）。给 ``None`` 表示全算
+        （「原始输出」页要用全量）。为什么要门控：``produce()`` + ``web_payload()``
+        是每秒真算一遍的，5 个模块全算等于 5 倍白工，和「前端不显示就不该算」相悖。
+        """
+        wanted = None if modules is None else set(modules)
         plugins = []
         for plugin in self.registry.plugins:
+            if wanted is not None and plugin.id not in wanted:
+                continue
             item: dict[str, Any] = {
                 "id": plugin.id,
                 "name": plugin.name,
@@ -455,7 +464,13 @@ class HostSession:
             except Exception as exc:  # noqa: BLE001 - 单个模块炸了不能拖垮整个界面
                 item["error"] = f"{type(exc).__name__}: {exc}"
             plugins.append(item)
-        return {"kind": "tables", "ts": round(time.time(), 3), "plugins": plugins}
+        return {
+            "kind": "tables",
+            "ts": round(time.time(), 3),
+            # 只算了哪几个模块（None → 全量）：自检据此验门控真的生效，不是「发了但没算」
+            "modules": None if modules is None else [p.id for p in self.registry.plugins if p.id in wanted],
+            "plugins": plugins,
+        }
 
     @staticmethod
     def table_json(output: Output | None) -> dict[str, Any] | None:

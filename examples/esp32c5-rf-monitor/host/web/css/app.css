@@ -346,3 +346,25 @@ pre.raw { margin: 0; font: 11px/1.45 var(--mono); color: var(--fg); white-space:
   .log { max-height: 12vh; }
   .scanbar__canvas { height: 56px; }
 }
+
+/* 弹窗切页暂停：提示条挂在浮层顶部（不遮面板内容，最后一帧留着看） */
+.popout__paused {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+  padding: 6px clamp(8px, 1vw, 14px);
+  background: rgba(255, 176, 32, 0.14);
+  border-bottom: 1px solid rgba(255, 176, 32, 0.45);
+  color: var(--fg);
+  font-size: clamp(11px, 0.85vw, 13px);
+}
+.popout__paused[hidden] { display: none; }
+.popout__paused-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #ffb020;
+  flex: 0 0 auto;
+}
+.popout--paused .popout__stage { opacity: 0.55; }

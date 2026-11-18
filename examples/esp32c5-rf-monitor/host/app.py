@@ -89,9 +89,47 @@ SPECTRUM_MIN_INTERVAL = 0.05
 TABLE_INTERVAL = 1.0
 #: 单个时间片长度（秒）：GUI 里 stop 的响应时间上限
 STEP_SECONDS = 0.35
+
+#: 页面 → 该页真正要用到的模块 id（``None`` = 全量）。
+#: 切到某页就只算这一页的模块（见 ``HostSession.tables(modules=...)``）：
+#: 前端不显示的页不该占 CPU，也不该抢射频线程的分析节拍。
+#: 新增页面 = 在 ``web/pages/registry.json`` 加一条 + 在这里登记它要的模块。
+PAGE_MODULES: dict[str, tuple[str, ...] | None] = {
+    "spectrum": (),               # 频谱页只吃 spectrum 帧，不吃任何模块表格
+    "waterfall": ("waterfall",),
+    "wifi": ("wifi_check",),
+    "ble": ("ble_risk",),
+    "capture": ("capture",),
+    "raw": None,                  # 原始输出：全量兜底
+}
 #: 连续失败多少个时间片就自动停机（core 目前没有退避，应用层兜底）
 MAX_CONSECUTIVE_ERRORS = 5
 MOCK_FRAMES_PER_WINDOW = 2  # 假固件每个窗口吐 2 帧（tests/fake_firmware.py 的约定）
+
+
+def wanted_pages(view: dict[str, object]) -> set[str]:
+    """当前所有窗口正在看的页面；没上报过就按「全都要」处理（宁可多算，不能黑屏）。"""
+    views = view.get("views") or {}
+    pages = {p for p in (views.values() if isinstance(views, dict) else []) if p}
+    return pages or {"raw"}
+
+
+def needed_modules(view: dict[str, object], all_ids: Iterable[str] = ()) -> list[str]:
+    """并集后真正要算的模块 id；含「原始输出」页（``None``）时返回全部。"""
+    ids: list[str] = []
+    for page in wanted_pages(view):
+        wanted = PAGE_MODULES.get(page, None)
+        if wanted is None:
+            return list(all_ids)
+        for mid in wanted:
+            if mid not in ids:
+                ids.append(mid)
+    return ids
+
+
+def wants_spectrum(view: dict[str, object]) -> bool:
+    """是否该推实时频谱帧：只有「实时频谱」页需要（它独占 spectrum 信号）。"""
+    return "spectrum" in wanted_pages(view)
 
 
 class Bridge(QObject):
@@ -106,9 +144,44 @@ class Bridge(QObject):
     state = Signal(str)
     log = Signal(str)
 
-    def __init__(self, window: "HostWindow") -> None:
+    def __init__(self, window: "HostWindow", view: dict[str, object] | None = None) -> None:
         super().__init__()
         self._window = window
+        #: 页面门控状态放**普通 dict**（由 HostWindow 持有）：射频线程要读它，
+        #: 而跨线程读 QObject 的实例属性是 PySide6 的已知死法（栈溢出、无回溯）。
+        self._view: dict[str, object] = view if view is not None else {"views": {}, "epoch": 0}
+
+    # ---- 页面门控 ----------------------------------------------------------
+    @Slot(str, result=str)
+    def setView(self, payload: str) -> str:  # noqa: N802 - JS 侧用驼峰
+        """前端报告「我这个窗口现在停在哪个页面」。
+
+        JS 在 ``Router.navigate()`` 里调一次；独立小窗口带自己的窗口标签，互不覆盖。
+        多窗口取**并集**：主窗口停在 BLE 页、独立窗口弹着瀑布图，两边都得有数据。
+        返回并集后的模块清单，前端/自检据此直接看到门控结果。
+        """
+        try:
+            data = json.loads(payload) if payload else {}
+        except Exception:  # noqa: BLE001 - 前端传坏不该崩
+            data = {}
+        page = str((data or {}).get("page") or "")
+        win = str((data or {}).get("win") or "main")
+        views = self._view.setdefault("views", {})
+        if page and isinstance(views, dict) and views.get(win) != page:
+            views[win] = page
+            self._view["epoch"] = int(self._view.get("epoch", 0) or 0) + 1
+        modules = needed_modules(self._view, self._module_ids())
+        return to_json({"page": page, "win": win,
+                        "epoch": int(self._view.get("epoch", 0) or 0), "modules": modules})
+
+    def _module_ids(self) -> list[str]:
+        """当前会话的模块 id 清单（拿不到就空表 → 调用方退回「全量」）。"""
+        session = getattr(self._window, "session", None)
+        registry = getattr(session, "registry", None)
+        try:
+            return [p.id for p in getattr(registry, "plugins", []) or []]
+        except Exception:  # noqa: BLE001 - 取不到清单不是错误，逐页门控会退回全量
+            return []
 
     # ---- JS 主动查询 ------------------------------------------------------
     @Slot(result=str)
@@ -219,6 +292,8 @@ class Runner(QThread):
         bridge: Bridge,
         lang: str = "zh",
         box: dict[str, object] | None = None,
+        view: dict[str, object] | None = None,
+        module_ids: Iterable[str] = (),
     ) -> None:
         super().__init__()
         self.session = session
@@ -228,6 +303,10 @@ class Runner(QThread):
         #: 不要把它存在 Runner 自己身上：主线程去读一个还在跑的 QThread 实例属性，
         #: PySide6 会走原生属性查找 → 直接栈溢出崩进程（实测无任何 Python 回溯）。
         self.box: dict[str, object] = box if box is not None else {}
+        #: 页面门控状态（普通 dict，主线程写 / 本线程读，绝不碰 QObject 属性）
+        self.view: dict[str, object] = view if view is not None else {"views": {}, "epoch": 0}
+        #: 会话里有哪些模块 id（构造时在主线程取一份，线程里不再回读会话）
+        self.module_ids: tuple[str, ...] = tuple(module_ids or ())
         self._stop = False
         self.last_error = ""
 
@@ -256,6 +335,7 @@ class Runner(QThread):
         session, bridge = self.session, self.bridge
         last_spectrum = 0.0
         last_slow = 0.0
+        last_epoch = int(self.view.get("epoch", 0) or 0)
         consecutive_errors = 0
         seen_errors = 0
 
@@ -263,12 +343,20 @@ class Runner(QThread):
 
         def on_snapshot(snap) -> None:
             nonlocal last_spectrum
+            # 页面门控：没人停在「实时频谱」页就整帧跳过（前端也没地方画）。
+            # 注意这里的 return **必须**在补节拍之前打住并按假固件的节拍睡一下，
+            # 否则假固件会把整条扫描瞬间跑完（真机由串口自然限速，不会）。
+            if not wants_spectrum(self.view):
+                if pace:
+                    time.sleep(pace)
+                return
             now = time.time()
             if now - last_spectrum < SPECTRUM_MIN_INTERVAL:
                 return
             last_spectrum = now
             try:
                 bridge.spectrum.emit(to_json(session.spectrum(snap)))
+                self.box["spectrum_emits"] = int(self.box.get("spectrum_emits", 0) or 0) + 1
             except Exception as exc:  # noqa: BLE001 - 一帧打包失败不该停掉整个会话
                 bridge.log.emit(tr(self.lang, "pack_failed", error=f"{type(exc).__name__}: {exc}"))
             if pace:
@@ -278,12 +366,26 @@ class Runner(QThread):
             while not self._stop:
                 stats = session.step(STEP_SECONDS, on_snapshot=on_snapshot)
                 now = time.time()
-                if stats is not None and now - last_slow >= TABLE_INTERVAL:
+                # view_epoch 变了（有人切页）就立刻补推一次，新页面不用干等一个周期
+                epoch = int(self.view.get("epoch", 0) or 0)
+                if stats is not None and (now - last_slow >= TABLE_INTERVAL or epoch != last_epoch):
                     last_slow = now
+                    last_epoch = epoch
                     snapshot = session.stats(stats)
                     self.box["stats"] = snapshot  # 收尾时 scheduler 已拆，自检靠这份留档
                     bridge.stats.emit(to_json(snapshot))
-                    bridge.tables.emit(to_json(session.tables()))
+                    modules = needed_modules(self.view, self.module_ids)
+                    # 空清单（只有「实时频谱」页在看）就别算了：这一页不吃任何模块表格
+                    if modules or epoch == 0:
+                        bridge.tables.emit(to_json(session.tables(modules or None)))
+                        # 留档：自检靠它证明「门控真的生效」，不是发了但没算
+                        views = self.box.setdefault("table_views", [])
+                        if isinstance(views, list):
+                            views.append(
+                                {"pages": sorted(wanted_pages(self.view)),
+                                 "modules": None if not modules else list(modules)}
+                            )
+                            del views[:-80]
                 if stats is not None:
                     if stats.source_errors > seen_errors:
                         seen_errors = stats.source_errors
@@ -322,7 +424,11 @@ class HostWindow(QObject):
         #: AUTO 模式目标底噪参考码
         self.default_gain_target = 4.0
         self.view = view
-        self.bridge = Bridge(self)
+        #: 页面门控状态：``{"views": {窗口标签: 页面 id}, "epoch": 序号}``。
+        #: 前端切页 → ``Bridge.setView`` 写这里；射频线程读它决定「这一秒算哪些模块」。
+        #: **必须早于 Bridge 构造**：Bridge 要拿它当共享状态（普通 dict，不是 QObject 属性）。
+        self.view_box: dict[str, object] = {"views": {}, "epoch": 0}
+        self.bridge = Bridge(self, view=self.view_box)
         self.session: HostSession | None = None
         self.runner: Runner | None = None
         #: 采集线程写、主线程读的普通 dict（放 stats 留档；见 Runner.box 的注释）
@@ -558,7 +664,14 @@ class HostWindow(QObject):
         self.session = session
         self.bridge.info.emit(to_json(info))
         self.bridge.state.emit(to_json({"state": "running", "ts": round(time.time(), 3)}))
-        self.runner = Runner(session, self.bridge, config.lang, box=self.stats_box)
+        self.runner = Runner(
+            session,
+            self.bridge,
+            config.lang,
+            box=self.stats_box,
+            view=self.view_box,
+            module_ids=[p.id for p in session.registry.plugins],
+        )
         self.runner.start()
         message = tr(config.lang, "started", what=info.get("identity") or config.port)
         return {"ok": True, "message": message, "info": info}
@@ -714,6 +827,9 @@ def run_selftest(app: QApplication, view: QWebEngineView, window: HostWindow, ar
         cap_page = pages.get("capture", {}) if isinstance(pages, dict) else {}
         wf_page = pages.get("waterfall", {}) if isinstance(pages, dict) else {}
         wf_page_probe = (wf_page.get("probe") or {}) if isinstance(wf_page, dict) else {}
+        pp = report.get("popout_pause") or {}
+        if isinstance(pp, dict):
+            report["table_views"] = window.stats_box.get("table_views") or []
         canvases = spectrum.get("canvases", []) if isinstance(spectrum, dict) else []
         drawn = [c for c in canvases if float(c.get("nonBlack", 0)) > 0.01]
         frames = int(spectrum.get("framesSeen", 0) or 0)
@@ -872,6 +988,29 @@ def run_selftest(app: QApplication, view: QWebEngineView, window: HostWindow, ar
             "layout_shrink": len(report.get("layout") or {}) >= 4
             and not (report.get("layout_bad") or {})
             and all(bool((v or {}).get("ok")) for v in (report.get("layout") or {}).values()),
+            # 弹窗切页规则：实时流暂停（带提示）→ 切回恢复；汇总型直接关。
+            # 只认 Popout.state() 的字段，不看「看起来像不像」。
+            "popout_pause": bool((pp.get("opened") or {}).get("open"))
+            and bool((pp.get("paused") or {}).get("paused"))
+            and bool((pp.get("paused") or {}).get("banner"))
+            and str((pp.get("paused") or {}).get("owner")) == "wifi"
+            and str((pp.get("paused") or {}).get("page")) == "ble"
+            and bool((pp.get("paused") or {}).get("connected")),
+            "popout_resume": bool((pp.get("resumed") or {}).get("open"))
+            and not bool((pp.get("resumed") or {}).get("paused"))
+            and not bool((pp.get("resumed") or {}).get("banner"))
+            and int((pp.get("resumed") or {}).get("rows", 0) or 0) > 0,
+            # 汇总型面板：先确认它**真的弹出来了**（否则「没弹」也能骗过这一条），再确认切页后关了
+            "popout_static_closes": bool((pp.get("static_open_raw") or {}).get("open"))
+            and not bool((pp.get("static_after_switch") or {}).get("open")),
+            # 页面门控：切到 wifi 页时表格**只算 wifi_check**；频谱帧在非频谱页不再推。
+            "view_gating": any(
+                list(v.get("pages") or []) == ["wifi"] and list(v.get("modules") or []) == ["wifi_check"]
+                for v in (report.get("table_views") or [])
+            ),
+            "spectrum_gating": int(pp.get("spectrum_on_ble", 0) or 0)
+            >= int(pp.get("spectrum_before", 0) or 0)
+            and int(pp.get("spectrum_after", 0) or 0) == int(pp.get("spectrum_on_ble", 0) or 0),
             "waterfall_render": bool((report.get("waterfall_render") or {}).get("open"))
             and len(str((report.get("waterfall_render") or {}).get("files", ""))) > 10,
         }
@@ -884,6 +1023,7 @@ def run_selftest(app: QApplication, view: QWebEngineView, window: HostWindow, ar
 
     def stage(page_id: str) -> None:
         """切到某个页面 → 等它画好 → 截图 + DOM 探针。"""
+        print(f"[selftest] 页 {page_id}", flush=True)  # 崩了也能知道走到哪一步
         view.page().runJavaScript(f"Router.navigate('{page_id}')")
 
         def probe() -> None:
@@ -910,6 +1050,9 @@ def run_selftest(app: QApplication, view: QWebEngineView, window: HostWindow, ar
             elif page_id == "waterfall":
                 # 瀑布图页：点一次「生成 PNG + HTML」，验 JS→Bridge→produce(force) 整条链路
                 waterfall_render_test(lambda: stage(nxt[0]))
+            elif page_id == "wifi":
+                # WiFi 页有「实时流表 + 三维图 + 判读说明」三种面板，正好验切页规则
+                popout_pause_test(lambda: stage(nxt[0]))
             elif page_id == "ble":
                 # BLE 页探完顺手动一遍顶栏增益控件：JS → Bridge → HostSession → 状态回推
                 QTimer.singleShot(400, lambda: gain_test(lambda: stage(nxt[0])))
@@ -1076,6 +1219,97 @@ def run_selftest(app: QApplication, view: QWebEngineView, window: HostWindow, ar
         report["popout"] = payload
         steps.append(f"弹出预览：{json.dumps({k: payload.get(k) for k in ('open', 'zoom', 'close')}, ensure_ascii=False)}")
         QTimer.singleShot(200, then)
+
+    def popout_pause_test(then) -> None:
+        """切页时弹窗怎么办：实时流**留着暂停**（带提示），切回**继续刷新**；汇总型直接关。
+
+        为什么只能实测：暂停是「路由只把事件派给当前页」顺带带来的效果，光读代码
+        分不清「真的挂了提示条」还是「只是看起来没画」。判据全取 ``Popout.state()``
+        的 paused/banner/owner 字段 + 切页前后频谱帧计数。
+
+        排程约定：**每一步都只靠 QTimer 单独排下一次**，绝不在 runJavaScript 的结果
+        回调里接着发起下一次 runJavaScript —— 那会在同一个 C++ 事件循环里重入，
+        实测直接把线程栈打爆（见本函数上一版）。
+        """
+        out: dict[str, object] = {}
+        report["popout_pause"] = out
+        box = window.stats_box
+
+        def js(code: str, cb=None) -> None:
+            if cb is None:
+                view.page().runJavaScript(code, 0)
+            else:
+                view.page().runJavaScript(code, 0, cb)
+
+        def store(tag: str):
+            """把一次 JS 结果落进 out[tag]（只存，不触发下一步）。"""
+
+            def take(result: object) -> None:
+                try:
+                    out[tag] = json.loads(str(result)) if result else {}
+                except Exception:  # noqa: BLE001
+                    out[tag] = {"parse_error": str(result)}
+
+            return take
+
+        def read_state(tag: str) -> None:
+            js("JSON.stringify(Popout.state())", store(tag))
+
+        def emits() -> int:
+            return int(box.get("spectrum_emits", 0) or 0)
+
+        schedule: list[tuple[int, object]] = [
+            # 归一化到 WiFi 页
+            (0, lambda: js("Router.navigate('wifi')")),
+            # 弹第一个面板（信道体检表 = 实时流面板）
+            (900, lambda: js(
+                "(function(){const p=document.querySelector('#page-container .panel');"
+                "if(!p||!window.Popout)return 'no-panel';Popout.open(p);return 'ok';})()",
+                store("open_raw"))),
+            (350, lambda: read_state("opened")),
+            # 切到 BLE 页：面板该留着、进入暂停
+            (250, lambda: (out.__setitem__("spectrum_before", emits()),
+                           js("Router.navigate('ble')"))),
+            (900, lambda: read_state("paused")),
+            (250, lambda: js(
+                "JSON.stringify({len:(((document.querySelector('.popout__paused-text')||{})"
+                ".textContent)||'').length})", store("paused_text"))),
+            # 停在 BLE 页：频谱帧不该再推（门控真的生效）
+            (250, lambda: out.__setitem__("spectrum_on_ble", emits())),
+            (800, lambda: out.__setitem__("spectrum_after", emits())),
+            # 切回 WiFi 页：暂停解除、表格继续刷新
+            (150, lambda: js("Router.navigate('wifi')")),
+            (1000, lambda: js(
+                "JSON.stringify(Object.assign(Popout.state(),"
+                "{rows: document.querySelectorAll('#wifi-rows tr').length}))", store("resumed"))),
+            # 汇总型面板（判读说明）弹出来再切页：应当直接关掉。
+            # 用 data-panel-static 选中，不按下标——实时流面板弹出去以后仍挂在
+            # #page-container 里（浮层就挂在那儿），下标会整体错位（踩过）。
+            (350, lambda: js(
+                "(function(){const p=document.querySelector('#page-container .panel[data-panel-static=\"1\"]');"
+                "if(!p)return 'no-static';"
+                "const k=p.dataset.panelKey;Popout.open(p);"
+                "return JSON.stringify({key:k,open:Popout.state().open,static:Popout.state().static});})()",
+                store("static_open_raw"))),
+            (350, lambda: js("Router.navigate('ble')")),
+            (900, lambda: read_state("static_after_switch")),
+            # 收尾：回到 WiFi 页再交棒，别让后面的步骤从 BLE 页开始
+            (200, lambda: js("Router.navigate('wifi')")),
+            (600, then),
+        ]
+
+        def step(i: int) -> None:
+            if i >= len(schedule):
+                return
+            delay, fn = schedule[i]
+
+            def run() -> None:
+                fn()
+                step(i + 1)  # 只是再排一次 QTimer，不是递归执行
+
+            QTimer.singleShot(delay, run)
+
+        step(0)
 
     def popout_window_test(then) -> None:
         """点「独立窗口」按钮 → Python 侧 createWindow → 新窗口真的渲染出画布。"""

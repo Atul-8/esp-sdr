@@ -27,6 +27,15 @@
  *   · 两阶段：先归零 `--fit-grow` 派发 resize（页面按倍率重画）→ 200ms 后量高度 →
  *     写新余量再派发一次 resize。这样不会自己跟自己打架（量的是稳定后的布局）。
  *
+ * **切页时弹窗怎么办**（`beforePageChange()` / `afterPageChange()`）：
+ *   · 面板是**实时流**（画布/表格随帧刷新）且切去的不是它所属页面 → **不关闭**，
+ *     留在浮层里**暂停刷新**，并在浮层顶部挂一条「模式已切换」提示；
+ *     切回它所属的页面就自动恢复刷新（页面钩子重新开始给它喂数据）。
+ *   · 面板是**汇总型**（判读说明、门槛表、一键体检结论、出图按钮）→ 直接关闭。
+ *     这类面板只是当时那一份快照的结论，跟着页面走没有意义。
+ *   · 暂停为什么是免费来的：路由只把 Bridge 事件派给**当前页**的模块，
+ *     面板所属页面不在前台时，它的 `onTables/onSpectrum` 根本不会被调用。
+ *
  * **窗口外弹窗**（`openDocked()`）：`window.open('index.html?solo=<页面:序号>')`，
  * Python 侧 `ConsolePage.createWindow` 接住、开一个真正的独立窗口（可以拖到别的
  * 显示器），新窗口加载同一套页面 + **同一个 Bridge**，只显示那一个面板。
@@ -46,6 +55,22 @@ window.Popout = (function () {
   let solo = false;          // 本窗口就是「独立小窗口」：关掉就没有内容了，不给关
   let fsOn = false;          // 当前是不是（由 Python 侧窗口 API 做的）全屏
   let suppress = 0;          // 自己派发合成 resize 时别自我递归
+  let pausedFor = null;      // 暂停中：面板所属页面 id（切回这一页就恢复刷新）
+  let closeSeq = 0;          // close() 被调用过几次（排障用）
+  let lastCloseTrace = "";   // 最近一次 close() 的调用栈（排障用）
+  let activePage = "";       // 当前页面 id（由 Router 在切页时告知）
+  let pauseBar = null;       // 「模式已切换」提示条
+
+  // 汇总型面板（**不需要**暂停/恢复那套）：值 = 该页 page.html 里 .panel 的下标顺序。
+  // 判读说明、门槛表、一键体检结论、出图按钮这类「当时那一份快照的结论」跟着页面走，
+  // 切页直接关掉才对；只有实时流面板（画布/随帧刷新的表）才值得留着暂停。
+  // 新页面要加面板时**只改这一张表**，别在 page.html 里散落标记。
+  const STATIC_PANELS = {
+    waterfall: [0, 1, 3],   // 0 周期快照说明 / 1 出图按钮 / 3 判读说明
+    wifi: [2],              // 2 判读说明
+    ble: [4, 5],            // 4 判读与建议 / 5 判据与边界
+    capture: [1, 4, 5],     // 1 一键体检结论 / 4 门槛表 / 5 判据与边界
+  };
 
   // ---- 装饰：每个面板右上角一个 ⤢ ------------------------------------------
   function decorate(root) {
@@ -53,6 +78,14 @@ window.Popout = (function () {
     const pageId = (window.Router && Router.current && Router.current.id) || "page";
     root.querySelectorAll(".panel").forEach((node, i) => {
       if (!node.dataset.panelKey) node.dataset.panelKey = pageId + ":" + i;
+      // **已经弹出去的面板不许再改归属**：它被搬进了浮层，而浮层就挂在
+      // #page-container 里，切页后这里会把它也遍历到。若照常改写，一个原本属于
+      // wifi 页的面板会被标成「ble 页的」，于是切回 wifi 时被判成「跨页」而
+      // 反复暂停（实测：切回来永远恢复不了）。
+      if (node.classList.contains("panel--popped")) return;
+      // 所属页 + 是否汇总型：切页时靠这两个字段决定「关掉」还是「留着暂停」
+      node.dataset.panelOwner = pageId;
+      node.dataset.panelStatic = (STATIC_PANELS[pageId] || []).indexOf(i) >= 0 ? "1" : "0";
       if (node.querySelector(":scope > .panel__zoom")) return;
       const btn = document.createElement("button");
       btn.type = "button";
@@ -122,11 +155,16 @@ window.Popout = (function () {
       '    <button type="button" class="btn btn--mini btn--ghost" data-act="close" data-i18n="popout.close">关闭</button>' +
       '  </span>' +
       "</div>" +
+      '<div class="popout__paused" hidden>' +
+      '  <span class="popout__paused-dot"></span>' +
+      '  <span class="popout__paused-text"></span>' +
+      "</div>" +
       '<div class="popout__stage"></div>';
     // 挂到页面容器里：搬走的面板仍然是页面 root 的后代，页面钩子照常能找到画布
     (document.getElementById("page-container") || document.body).appendChild(overlay);
     stage = overlay.querySelector(".popout__stage");
     bar = overlay.querySelector(".popout__bar");
+    pauseBar = overlay.querySelector(".popout__paused");
     overlay.addEventListener("click", (ev) => {
       const act = ev.target.dataset && ev.target.dataset.act;
       if (act) {
@@ -150,6 +188,8 @@ window.Popout = (function () {
     // 切页会把 #page-container 的 innerHTML 换掉，浮层可能已经不在文档里了
     if (!overlay || !overlay.isConnected) build();
     panel = node;
+    pausedFor = null;
+    setPaused(false);
     home = { parent: node.parentNode, next: node.nextSibling };
     stage.appendChild(node);
     node.classList.add("panel--popped");
@@ -161,22 +201,43 @@ window.Popout = (function () {
   }
 
   function close() {
-    if (!overlay || !overlay.isConnected) {
-      // 浮层跟着上一页一起被清掉了：只需要把状态复位，面板本身已经不存在
+    // 排障用：谁关的、关了几次。state() 里带出去，自检 / 手敲 console 都能看
+    closeSeq += 1;
+    lastCloseTrace = String((new Error().stack || "")).split(String.fromCharCode(10)).slice(1, 4).join(" | ");
+    setPaused(false);
+    pausedFor = null;
+    // 浮层和面板都不在文档里 = 真被上一页的 innerHTML 一起清掉了，只复位状态
+    if (overlay && !overlay.isConnected && !(panel && panel.isConnected)) {
       overlay = null;
       stage = null;
       bar = null;
+      pauseBar = null;
       panel = null;
       home = null;
       return;
     }
-    if (!panel) return;
+    if (!overlay || !panel) return;
     if (fsOn) fullscreen(false);
     panel.classList.remove("panel--popped");
     panel.style.width = "";
     panel.style.removeProperty("--fit-scale");
     panel.style.removeProperty("--fit-grow");
-    if (home && home.parent) home.parent.insertBefore(panel, home.next || null);
+    const anchorOk = !!(home && home.next && home.parent && home.next.parentNode === home.parent);
+    if (home && home.parent && home.parent.isConnected) {
+      // home.next 可能已经被上一页的 innerHTML 连根拔掉（只剩个野指针）。
+      // 直接 insertBefore 会抛 NotFoundError，而抛出时状态已经改了一半 → 面板卡死。
+      home.parent.insertBefore(panel, anchorOk ? home.next : null);
+    } else {
+      // 中途切过页：原位置（旧页面的 DOM）已经不在文档里。
+      // 同一页重新注入后面板顺序不变 → 换掉当前页里同 key 的那个空壳即可。
+      const key = panel.dataset.panelKey;
+      const holder = key
+        ? document.querySelector('#page-container [data-panel-key="' + key + '"]')
+        : null;
+      if (holder && holder !== panel && holder.parentNode) holder.parentNode.replaceChild(panel, holder);
+      else if (panel.parentNode) panel.parentNode.removeChild(panel);
+      home = null;
+    }
     overlay.hidden = true;
     const was = panel;
     panel = null;
@@ -189,6 +250,80 @@ window.Popout = (function () {
   function toggle(node) {
     if (panel === node) close();
     else open(node);
+  }
+
+  // ---- 切页：实时流暂停 / 汇总型关闭 --------------------------------------
+  function ownerOf(node) {
+    return (node && node.dataset && node.dataset.panelOwner) || "";
+  }
+
+  function isStatic(node) {
+    return !!(node && node.dataset && node.dataset.panelStatic === "1");
+  }
+
+  function pageTitle(pageId) {
+    if (!pageId) return "";
+    const entry = ((window.Router && Router.pages) || []).find((p) => p.id === pageId);
+    return entry ? (I18N.entry("title", entry) || pageId) : pageId;
+  }
+
+  /** 显示/隐藏「模式已切换」提示条（暂停时面板保持最后一帧，不遮内容）。 */
+  function setPaused(on, page) {
+    if (!overlay) return;
+    overlay.classList.toggle("popout--paused", !!on);
+    if (pauseBar) {
+      pauseBar.hidden = !on;
+      if (on) {
+        const text = pauseBar.querySelector(".popout__paused-text");
+        if (text) text.textContent = T("popout.paused", { page: pageTitle(page) || page || "" });
+      }
+    }
+    if (on) applyChrome();
+  }
+
+  /** 浮层挂在这一页的容器里；切页前先把它摘下来，别跟着 innerHTML 一起被清掉。 */
+  function detachOverlay() {
+    if (overlay && overlay.isConnected) overlay.remove();
+  }
+
+  /** Router 在换页**之前**调：汇总型/同页面 → 关闭；实时流 → 留在浮层里暂停。 */
+  function beforePageChange(nextPage) {
+    if (!panel) {
+      detachOverlay();
+      return;
+    }
+    if (pausedFor) {
+      // 已经在暂停中（面板被搬到浮层里晾着）：这次切页只把浮层摘下来，
+      // 归属和提示都别重算，等 afterPageChange 决定「继续暂停」还是「恢复刷新」。
+      detachOverlay();
+      return;
+    }
+    const owner = ownerOf(panel);
+    if (isStatic(panel) || !owner || owner === nextPage) {
+      close();
+      detachOverlay();
+      return;
+    }
+    if (fsOn) fullscreen(false);
+    pausedFor = owner;
+    setPaused(true, nextPage);
+    detachOverlay();
+  }
+
+  /** Router 在换页**之后**调：把浮层接回新页面，并在切回所属页时恢复刷新。 */
+  function afterPageChange(pageId) {
+    activePage = pageId;
+    const host = document.getElementById("page-container");
+    if (overlay && host && !overlay.isConnected) host.appendChild(overlay);
+    if (!panel) return;
+    if (pausedFor && pageId === pausedFor) {
+      // 切回面板所属页：页面钩子会重新喂数据，这里只要把提示收掉
+      pausedFor = null;
+      setPaused(false);
+      refit();
+    } else if (pausedFor) {
+      setPaused(true, pageId);
+    }
   }
 
   function titleOf(node) {
@@ -381,6 +516,8 @@ window.Popout = (function () {
     applyChrome();
     markFull();
     if (panel) overlay.querySelector(".popout__title").textContent = titleOf(panel);
+    // 暂停提示是动态文案（带页面名），I18N.apply 翻不到，得按当前语言重写一遍
+    if (pausedFor) setPaused(true, activePage || pausedFor);
   }
 
   /** 给 --selftest 用：开 → 放大 → 关，把三段的实测值记到 window.__popout。 */
@@ -438,6 +575,22 @@ window.Popout = (function () {
     open,
     close,
     toggle,
+    beforePageChange,
+    afterPageChange,
+    state: function () {
+      return {
+        open: !!panel,
+        paused: !!pausedFor,
+        owner: panel ? ownerOf(panel) : "",
+        static: panel ? isStatic(panel) : false,
+        page: activePage,
+        key: panel ? (panel.dataset.panelKey || "") : "",
+        banner: !!(pauseBar && !pauseBar.hidden),
+        connected: !!(overlay && overlay.isConnected),
+        closes: closeSeq,
+        closeTrace: lastCloseTrace,
+      };
+    },
     setZoom,
     setSolo,
     openSolo,

@@ -12,7 +12,8 @@ host/
 ├── session.py         # 纯 Python 逻辑层（无 Qt，可单独测）：配置校验 / 会话 / 频谱打包
 ├── start.bat          # Windows 双击启动（缺依赖自动装）
 ├── requirements.txt   # PySide6 + pyserial
-├── tests/test_session.py  # 23 条无窗口自测
+├── tests/test_session.py  # 25 条无窗口自测（含页面门控 2 条）
+├── tests/probe_popout.py  # 弹窗切页行为快速探针（20 s 出结果，迭代弹窗逻辑用它）
 └── web/
     ├── index.html     # 唯一入口：顶栏 + 导航 + #page-container + 页脚
     ├── css/app.css    # 暗色仪表盘主题
@@ -81,6 +82,34 @@ Windows 上也可以双击 `host/start.bat`（缺依赖会自动 `pip install`�
    ```
    然后在 `index.html` 的 `<script>` 列表里加一行（这是唯一的 Python 之外的手工步骤）。
 4. 没写 JS 也能跑：`raw` 页面会把任何模块的 `Output` 表格渲染出来。
+5. **告诉 Python 这一页要算哪些模块**：在 `app.py` 的 `PAGE_MODULES` 里加一行
+   `"<id>": ("<模块 id>",)`（见下节「页面门控」）。不登记就按「全量」算——能跑，但白算。
+
+## 页面门控（只看哪一页，就只算哪一页的账）
+
+射频线程每轮 `session.step()` 都会产出五个模块的表格，而 `produce()` + `web_payload()`
+是真算一遍的。五页同时只显示一页，**全算 = 5 倍白工**，所以：
+
+| 位置 | 做了什么 |
+|---|---|
+| `web/js/router.js` | `navigate()` 末尾调 `Bridge.call("setView", {page, win})`，告诉 Python 这个窗口停在哪一页 |
+| `host/app.py` `Bridge.setView` | 写进 `HostWindow.view_box`（**普通 dict**，不是 QObject 属性），窗口标签区分主窗口/独立小窗，多窗口取**并集** |
+| `host/app.py` `needed_modules()` | 按 `PAGE_MODULES` 把并集翻成模块 id；含 `raw` 页（值 `None`）就全量 |
+| `host/app.py` `Runner` | 表格只 `session.tables(modules)`；`spectrum` 帧只在有人停在频谱页时才推；切页那一轮立刻补推一次，新页面不用干等 1 秒 |
+| `host/session.py` `tables(modules)` | 只对给定 id 调 `produce()`；响应里回一个 `modules` 字段（`None` = 全量），自检据此证明「不是发了没算」 |
+
+页面到模块的对照（`PAGE_MODULES`）：`spectrum: ()`（不吃表格，只要频谱帧）、
+`waterfall: ("waterfall",)`、`wifi: ("wifi_check",)`、`ble: ("ble_risk",)`、
+`capture: ("capture",)`、`raw: None`（全量）。
+
+两条注意：
+
+* **跨线程只读普通 dict**：射频线程读 `view_box` / 写 `stats_box`，绝不跨线程读 QObject
+  的实例属性（PySide6 那条路会栈溢出崩进程，且没有任何 Python 回溯）。`Runner` 手上的
+  `module_ids` 是构造时在主线程取的一份副本。
+* 门控只管「算不算」，**不改调度权重**：五个模块的 `slice_weight` 仍是各 1.0，
+  自检里 `share` 依旧 5 × 0.20。不想看到某模块的扫描时间被浪费，才需要在固件侧做
+  状态机（见 `docs/` 里的方案讨论）。
 
 ## 扫频进度条（`web/js/scanbar.js`）
 
@@ -117,11 +146,32 @@ Windows 上也可以双击 `host/start.bat`（缺依赖会自动 `pip install`�
   然后派发一次 `resize` 让页面自己的钩子重算。
 - 尺寸一变，2D 瀑布**保留历史**（把旧缓冲按新宽度重采样，`resizeWaterfall()`），
   不再像以前那样清空重来。
-- 换页时 `Router.navigate()` 先 `Popout.close()`：浮层里那个面板属于上一页的 DOM，
-  不搬回去会被 `innerHTML =` 一起清掉。
+- 换页时不把面板「搬回去」而是**先安顿好浮层**：调 `Popout.beforePageChange(下一页)`
+  判定该关还是该暂停（见下节「切页时弹窗怎么办」），并先把浮层从文档里摘下来，
+  否则会被 `host.innerHTML = html` 连根清掉。
 
 新实验页不用写任何代码就有这个功能——`Popout.attach(#page-container)` 是委托到
 `.panel` 上的，按钮也是自动加的（`MutationObserver` 兜住运行时新插入的面板）。
+
+### 切页时弹窗怎么办（实时流暂停 / 汇总型关掉）
+
+面板分两类，切页时**待遇不同**：
+
+| 面板种类 | 判据 | 切走后 | 切回来 |
+|---|---|---|---|
+| 实时流（画布、随帧刷新的表） | 不是 `STATIC_PANELS` 里登记的 | **不关**，停在最后一帧 + 顶部琥珀条「模式已切换：本面板已暂停刷新」 | 自动继续刷新，提示条消失 |
+| 汇总型（判读说明、门槛表、一键体检结论、出图按钮） | 在 `STATIC_PANELS` 登记 | **直接关掉**（它只是「当时那份快照的结论」，留着会误导） | —— |
+
+- 汇总型**只在一张表里登记**（`popout.js` 的 `STATIC_PANELS`，值是 `.panel` 的下标）：
+  `waterfall: [0,1,3]` / `wifi: [2]` / `ble: [4,5]` / `capture: [1,4,5]`。新页面加面板只改这张表。
+- 面板的归属页 + 是否汇总型写在 `data-panel-owner` / `data-panel-static` 上，
+  由 `decorate()` 统一盖章。**已经弹出去的面板不再盖章**（它被搬进浮层，而浮层就挂在
+  `#page-container` 里，切页后会再被遍历到；照改会把 wifi 页的面板标成 ble 页的，
+  导致切回来永远恢复不了）。
+- 「暂停」几乎不用写代码：`Router.dispatch` 只把 `tables`/`spectrum` 派给**当前页**的模块，
+  面板留在浮层里就自然收不到新帧。
+- 暂停状态下的 `Popout.state()`：`{open:true, paused:true, banner:true, owner:"<原页>"}`；
+  恢复后 `paused:false, banner:false`。
 
 ### 弹出后高度自适应（别留一大片空白）
 
@@ -190,7 +240,8 @@ Windows 上也可以双击 `host/start.bat`（缺依赖会自动 `pip install`�
 `wf2d`（含 `paintedRows/distinctRows/topMean/bottomMean`）、`wf2dAxis`
 （`{lo, hi, center, ticks}`，单位 MHz）、`three`。
 
-自检另外收两路只有宿主才看得见的证据：`Popout.selftest()`（浮层开 / 1.5× 缩放 /
+自检另外收两路只有宿主才看得见的证据（`popout_pause` / `popout_resume` /
+`popout_static_closes` 三项专验上面那张表，`view_gating` / `spectrum_gating` 验页面门控）：`Popout.selftest()`（浮层开 / 1.5× 缩放 /
 归位、`--fit-grow`、面板高度 vs 浮层高度）与 Python 侧 `popout_window`（独立窗口
 里真有画布、窗口标题、截图）、`popout_fullscreen`（`win.isFullScreen()` 为真、
 全屏下面板仍吃满高度）。这三项是「弹出预览 + 窗口外弹窗」的验收凭据。
@@ -345,6 +396,9 @@ index 是 **PHY 表项**，既不等于 dB 也不线性。
 | 弹出预览一把静态文案全翻回默认值（`#raw-text` 的 ASCII 被清成「未连接」） | `Popout` 里为了翻按钮标题调了 `I18N.apply(整个面板)`，把 `data-i18n` 占位的**动态内容**一起重写了 | 只 `I18N.apply(工具栏)` + 逐个设按钮 `title`，绝不 apply 面板 |
 | 新加的按钮（如「生成 PNG + HTML」）点了没反应，Promise 直接 resolve 成 `[]`，Python 侧连日志都没有 | `@Slot(str, result=str)` 写在了**无入参**的方法上：Qt 按“要一个 str 入参”注册，网页只传回调就被吞掉 | `@Slot` 的参数表必须和方法签名严格一致（无入参就只写 `result=str`）；靠 `--selftest` 里真点一次按钮的 `waterfall_render` 项守着 |
 | 关闭浮层后面板还在浮层里 / 打不开第二次 | 浮层元素只是 `hidden`，探针按「元素存在」判断成没关 | 判据改成 `.popout:not([hidden])` 与 `overlay.hidden`；关闭时把面板 `insertBefore` 回原位 |
+| 切页后弹出去的实时流面板永远恢复不了（一直在暂停） | `decorate()` 会遍历 `#page-container` 下所有 `.panel`，而浮层就挂在那里 → 把已弹出的 wifi 面板重新盖章成「ble 页的」，切回 wifi 被判成跨页 | `decorate()` 见到 `panel--popped` 直接 `return`，不再改归属 |
+| 弹窗一开就报 `NotFoundError: insertBefore`，面板卡在半开状态 | `close()` 复原时用 `home.next` 当锚点，但那一页的 DOM 早被 `innerHTML =` 换掉了，锚点成了野指针 | 复原前校验 `home.next.parentNode === home.parent`，不成立就退回 `appendChild` 语义 |
+| 自检跑到某一页整进程消失（无回溯，`exit=127`） | 在 `runJavaScript` 的**结果回调里**接着发起下一次 `runJavaScript`，QWebEngine 在同一 C++ 事件循环里重入 → 线程栈打爆 | 每次 `runJavaScript` 之间一律用 `QTimer.singleShot()` 排程；改用 `tests/probe_popout.py`（20 s）替代整套自检（3.5 min）来迭代弹窗逻辑 |
 | 弹出/放大后画布高度一点没变，下面一大片空白 | 页面 resize 钩子用 `root.querySelector("#spec-canvas")`，面板被搬到 `body` 下的浮层后就不在 `root` 里了 → 拿到 `null` 抛 `TypeError`，整段重绘中断 | 浮层挂到 `#page-container` 内（`position: fixed`，视觉不变），`fitCanvas(null)` 也返回空对象不再抛错 |
 | 点「全屏」没反应，布局跟普通窗口一模一样 | 合成点击没有用户手势，Chromium 拒 `requestFullscreen()`（`QtWebEngine` 的 `fullScreenRequested` 压根没触发） | 全屏走 `Bridge.setFullscreen` → Python `win.showFullScreen()`；DOM API 只作纯浏览器兜底 |
 | 独立窗口里画面空白/不刷新 | 新窗口晚连上，`QWebChannel` 之前的信号全丢了 | `runtime()` 带回最后 `spectrum`/`tables`，`syncRuntime()` 直接回放；`HostWindow` 缓存两份 JSON |

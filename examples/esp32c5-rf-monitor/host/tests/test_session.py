@@ -176,6 +176,31 @@ class SessionTests(unittest.TestCase):
         for channel in payload["channels"]:
             self.assertIn(channel["level"], allowed)
 
+    def test_tables_gate_to_one_module(self):
+        """页面门控：只给一个模块名时**只算它**，别的模块连 produce 都不该被叫。
+
+        为什么值得单测：``produce()`` + ``web_payload()`` 是每秒真算一遍的，
+        5 个模块全算 = 5 倍白工。门控失效不会报错，只会悄悄变慢，所以必须自证。
+        """
+        self.session.open(HostConfig.from_json(to_json({"mock": True, "scenario": "wifi_busy"})))
+        self.session.step(2.0)
+        gated = self.session.tables(["capture"])
+        self.assertEqual(gated["modules"], ["capture"], "只算了 capture 就该只报 capture")
+        self.assertEqual([p["id"] for p in gated["plugins"]], ["capture"])
+        # 全量对照：不给 modules 时五个模块都在（「原始输出」页要用）
+        full = self.session.tables()
+        self.assertIsNone(full["modules"], "不给 modules 表示全量，modules 字段应为 None")
+        self.assertEqual(len(full["plugins"]), len(self.session.registry.plugins))
+        self.assertGreater(len(full["plugins"]), len(gated["plugins"]))
+
+    def test_tables_gate_skips_unknown_ids(self):
+        """页面门控按 id 过滤：给了不存在的模块名不能当成「全量」也不能炸。"""
+        self.session.open(HostConfig.from_json(to_json({"mock": True, "scenario": "quiet"})))
+        self.session.step(1.0)
+        empty = self.session.tables(["not_a_module"])
+        self.assertEqual(empty["plugins"], [])
+        self.assertEqual(empty["modules"], [])
+
     def test_describe_carries_scan_plans(self):
         """扫频进度条靠这个画频段地图：必须是 [[中心频点, 带宽], ...] 的扫描顺序表。"""
         info = self.session.open(HostConfig.from_json(to_json({"mock": True, "scenario": "wifi_busy"})))
