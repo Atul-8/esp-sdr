@@ -29,12 +29,12 @@
 ```sh
 # ① 构建机编译（首次/全量走 stage 到本地盘：92 s；增量 10 s）
 #    共享盘里做首次全量会挂死（实测 29 min 无产物），所以全量必须 stage
-bash /c/.ai_global/meta/scripts/espidf-vm/vm-stage-build.sh E:/_00AE_PROJECR/esp32c5_sdr_app/repo
+bash /c/.ai_global/meta/scripts/espidf-vm/vm-stage-build.sh E:/_00AE_PROJECR/esp32c5_sdr_app/repo-fsm
 
 # ② 取回要烧的产物（整组同一次构建，别和主机旧 bin 混用）
-cd /e/_00AE_PROJECR/esp32c5_sdr_app/repo && mkdir -p build/bootloader build/partition_table
+cd /e/_00AE_PROJECR/esp32c5_sdr_app/repo-fsm && mkdir -p build/bootloader build/partition_table
 for f in esp_sdr.bin bootloader/bootloader.bin partition_table/partition-table.bin flash_args; do
-  scp -q idf-vm:/home/atul/work/repo/build/$f build/$f
+  scp -q idf-vm:/home/atul/work/repo-fsm/build/$f build/$f
 done
 
 # ③ 烧 COM56（不挂 monitor）
