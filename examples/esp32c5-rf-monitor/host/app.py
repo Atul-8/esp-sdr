@@ -358,6 +358,10 @@ class Runner(QThread):
         consecutive_errors = 0
         seen_errors = 0
         relinks = 0
+        #: 故障注入（只给自检/回归用）：ESPSDR_FAULT_FAILED_AFTER_S=6 → 跑满 6 s
+        #: 后人为把链路标成失效，用来证明「自动重同步」这条恢复路径真的接上了。
+        fault_after_s = float(os.environ.get("ESPSDR_FAULT_FAILED_AFTER_S", "0") or 0)
+        fault_done = False
 
         pace = self._mock_pace()
 
@@ -384,6 +388,14 @@ class Runner(QThread):
 
         try:
             while not self._stop:
+                if fault_after_s and not fault_done:
+                    if time.time() - getattr(session, "started_at", time.time()) >= fault_after_s:
+                        fault_done = True
+                        link = getattr(session, "link", None)
+                        if link is not None and not getattr(link, "failed", False):
+                            link.failed = True
+                            self.box["fault_injected"] = True
+                            bridge.log.emit("[test] fault injection: link marked failed")
                 stats = session.step(STEP_SECONDS, on_snapshot=on_snapshot)
                 now = time.time()
                 # view_epoch 变了（有人切页）就立刻补推一次，新页面不用干等一个周期
@@ -1038,6 +1050,8 @@ def run_selftest(app: QApplication, view: QWebEngineView, window: HostWindow, ar
         except Exception:  # noqa: BLE001 - 自检收尾不该因统计失败而崩
             share = {}
         report["share"] = share
+        # 故障注入留档（只有 ESPSDR_FAULT_FAILED_AFTER_S 设了才会有），自检/回归靠它
+        report["fault_injected"] = bool(window.stats_box.get("fault_injected"))
 
 
         report["canvases_drawn"] = len(drawn)

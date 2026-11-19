@@ -63,6 +63,11 @@ $ python testing/probe_resilient.py --windows 24
 | `python -m unittest discover -s tests -t .`（分析层） | 280 tests OK |
 | `python app.py --selftest --real --port COM56 --gain-index 60 --seconds 12` | `EXIT=0`，52/52 全绿，`hits 0`，`device.frames 146 / misses 0` |
 | `python app.py --selftest --mock --engine device --seconds 10` | `EXIT=0`，52/52 全绿 |
+| **故障注入端到端**：`ESPSDR_FAULT_FAILED_AFTER_S=4 python app.py --selftest --real --port COM56 --gain-index 60 --seconds 12` | `EXIT=0`、`fault_injected:true`、52/52 全绿、`device.frames 260 / misses 0` |
+
+**故障注入**（`ESPSDR_FAULT_FAILED_AFTER_S=<秒>`，只在自检/回归用）：跑满 N 秒后人为把
+`link.failed` 置位，报告里以 `fault_injected` 留档。它就为证明「GUI 里这条恢复路径真的接上了」
+而存在 —— 不接的话 RF 线程 5 片内自动停机，所有页面探针会全空。
 
 ## 5. 边界
 

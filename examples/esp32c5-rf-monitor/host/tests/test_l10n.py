@@ -373,5 +373,44 @@ def _snapshot_at(request, codes: list[float], index: int):
     )
 
 
+class KindWordsTest(unittest.TestCase):
+    """抓档/守卫的「类型」词直方表里当单元格，必须每个都有英文。
+
+    这些词只在真板（或故障注入跑出来的数据）里才凑齐，假场景往往只出现一两个 ——
+    实测漏了 `持续单频点`，英文界面抓档页表格里就冒出四个中文字。
+    """
+
+    def test_every_kind_word_has_english(self):
+        from modes import capture as capture_mode
+        from modes import guard_58g as guard_mode
+
+        words: set[str] = set()
+        for module in (capture_mode, guard_mode):
+            for name in dir(module):
+                if "KIND" not in name or not name.isupper():
+                    continue
+                value = getattr(module, name)
+                if isinstance(value, str):
+                    words.add(value)
+                elif isinstance(value, (tuple, list)):
+                    words.update(str(v) for v in value if isinstance(v, str))
+        self.assertGreaterEqual(len(words), 8, f"类型词没抓全：{sorted(words)}")
+        for word in sorted(words):
+            english = l10n.translate(word)
+            self.assertFalse(
+                any(not ch.isascii() for ch in english),
+                f"{word!r} 没有英文条目（翻译结果 {english!r}）",
+            )
+            self.assertNotEqual(english, word, f"{word!r} 原样返回了，说明 TABLE 缺条目")
+
+    def test_kind_words_are_used_in_tables(self):
+        """类型词确实会进表格/ASCII 出口（不是只躺在常量里）。"""
+        source = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "..", "modes", "capture.py")
+        with open(source, encoding="utf-8") as handle:
+            text = handle.read()
+        self.assertIn('"持续单频点"', text)
+        self.assertEqual(l10n.translate("持续单频点"), "Persistent single tone")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

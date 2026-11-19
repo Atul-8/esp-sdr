@@ -652,6 +652,8 @@ epo\examples\esp32c5-rf-monitor`；`ESPSDR_SRC=/tmp` 正确抛错 |
 | 全套回归 | `python -m unittest discover -s tests -t .`（分析层） | **280 tests OK（65.2 s）** |
 | 真板 GUI 自检 | `cd host && python app.py --selftest --real --port COM56 --gain-index 60 --seconds 12` | **`EXIT=0`，`ok:true`，`checks 52/52` 全绿**；`en_cjk.hitCount 0`、`missing 0`；`device.frames 146 / misses 0 / distinct 90` |
 | 假固件自检（设备自扫） | `python app.py --selftest --mock --engine device --seconds 10` | **`EXIT=0`，52/52 全绿**；`device.frames 101 / misses 0 / distinct 90` |
+| **故障注入端到端**（真板 GUI） | `ESPSDR_FAULT_FAILED_AFTER_S=4 python app.py --selftest --real --port COM56 --gain-index 60 --seconds 12` | **`EXIT=0`、`ok:true`、`fault_injected:true`、52/52 全绿**、`hits 0`、`device.frames 260 / misses 0 / distinct 90` —— 跑到第 4 秒人为把链路标失效，采集没停、页面探针不空，证明「自动重同步」这条路径真的接上了（不接的话 RF 线程 5 片内自动停机 → 所有页面探针全空） |
+| 类型词英文化 | `cd host && python tests/test_l10n.py KindWordsTest -v` | **2 tests OK**；`modes/capture.py` / `modes/guard_58g.py` 全部 `KIND*` 常量都有英文（故障注入那轮真板暴露出漏翻的 `持续单频点`） |
 
 ### 边界
 
