@@ -26,7 +26,8 @@ window.Pages.waterfall = (function () {
   let last = null;
   let layout = null;              // {x0, segW, y0, dataH, cols, rows, cellW, cellH}
   let cells = [];                 // 每个频段一份 Uint8Array（已 base64 解码）
-  let range = null;               // {lo, hi}：显示拉伸范围（平滑跟随，避免闪）
+  let range = null;               // {lo, hi}：全图拉伸范围（平滑跟随，避免闪）
+  const bandRange = {};           // 每段自己的 {lo, hi}：段内拉伸，见 fitBandRanges()
   let hover = null;               // {band, col, row}
   let resizeTimer = null;
   let report = null;
@@ -126,6 +127,7 @@ window.Pages.waterfall = (function () {
     }
 
     cells = bands.map((b) => (b.cells ? decode(b.cells) : UNITY));
+    fitBandRanges(bands, cells);
 
     const dataW = W - PAD.left - PAD.right - GAP * (bands.length - 1);
     const segW = Math.max(40, Math.floor(dataW / bands.length));
@@ -147,6 +149,7 @@ window.Pages.waterfall = (function () {
       drawBand(ctx, band, cells[index], x0, PAD.top, segW, dataH, cols, rows);
       drawBandAxis(ctx, band, x0, segW, PAD.top + dataH + 4);
     });
+    drawLegend(ctx, W, H);
     drawTimeAxis(ctx, payload, PAD.top, dataH);
     markIncomplete(ctx, payload);
     drawCursor(ctx);
@@ -155,13 +158,14 @@ window.Pages.waterfall = (function () {
   function drawBand(ctx, band, data, x0, y0, w, h, cols, rows) {
     const img = ctx.createImageData(w, h);
     const px = img.data;
+    const rng = bandRange[band.id] || range;
     for (let y = 0; y < h; y++) {
       const row = Math.min(rows - 1, Math.floor((y / h) * rows));
       const base = row * cols;
       for (let x = 0; x < w; x++) {
         const col = Math.min(cols - 1, Math.floor((x / w) * cols));
         const code = data.length ? data[base + col] : 0;
-        const rgb = colorFor(code);
+        const rgb = colorFor(code, rng);
         const i = (y * w + x) * 4;
         px[i] = rgb[0];
         px[i + 1] = rgb[1];
@@ -174,13 +178,80 @@ window.Pages.waterfall = (function () {
     ctx.strokeRect(x0 + 0.5, y0 + 0.5, w - 1, h - 1);
   }
 
-  /** 0 码 = 没扫到（最暗底色）；否则按当前拉伸范围映射到同一条热力色带 */
-  function colorFor(code) {
+  /** 0 码 = 没扫到（最暗底色）；否则按给定拉伸范围映射到同一条热力色带 */
+  function colorFor(code, rng) {
     if (!code) return BG;
-    const lo = range ? range.lo : 0;
-    const hi = range ? range.hi : 255;
-    const t = (code - lo) / (hi - lo || 1);
+    const r = rng || range || { lo: 0, hi: 255 };
+    const t = (code - r.lo) / (r.hi - r.lo || 1);
     return U.heatRGB(Math.max(0, Math.min(1, t)));
+  }
+
+  /**
+   * 每个频段**各自**拉伸（直方图 p5..p95，最小跨度 8 码），并做慢速平滑。
+   *
+   * 为什么不能全图共用一条范围：三个频段的绝对电平差得很远（2.4G 底噪高、
+   * 5G HIGH 靠窗沿衰减），共用一条范围时电平低的那一段整片压到最暗，
+   * 看着就像"5G HIGH 没扫到"（用户真板就是这么报的）。分段拉伸以后每段都能看见
+   * 自己的结构；跨段比绝对值请看每段标题旁标出来的码值范围。
+   */
+  function fitBandRanges(bands, arrays) {
+    bands.forEach((band, i) => {
+      const data = arrays[i] || UNITY;
+      const hist = new Uint32Array(256);
+      let n = 0;
+      for (let k = 0; k < data.length; k += 3) {   // 抽样 1/3，够稳且快
+        const v = data[k];
+        if (!v) continue;
+        hist[v] += 1;
+        n += 1;
+      }
+      if (!n) {
+        // 这一轮这段真的没扫到：保留上一次的范围，别把颜色跳成一片黑
+        return;
+      }
+      const pick = (frac) => {
+        const want = Math.max(1, Math.round(n * frac));
+        let acc = 0;
+        for (let v = 0; v < 256; v++) {
+          acc += hist[v];
+          if (acc >= want) return v;
+        }
+        return 255;
+      };
+      const next = { lo: pick(0.05), hi: pick(0.95) };
+      if (next.hi - next.lo < 8) next.hi = next.lo + 8;
+      const prev = bandRange[band.id];
+      bandRange[band.id] = prev
+        ? { lo: prev.lo + (next.lo - prev.lo) * 0.3, hi: prev.hi + (next.hi - prev.hi) * 0.3 }
+        : next;
+    });
+  }
+
+  /** 色带图例（右上角）：说明「亮 = 挤」以及每段是各自拉伸的 */
+  function drawLegend(ctx, W, H) {
+    const ids = last && last.bands ? last.bands.map((b) => b.id) : [];
+    if (!ids.length) return;
+    const barW = 66;
+    const barH = 8;
+    const x = W - PAD.right - barW;
+    const y = PAD.top + 2;
+    const grad = ctx.createLinearGradient(x, 0, x + barW, 0);
+    for (let i = 0; i <= 4; i++) {
+      const rgb = U.heatRGB(i / 4);
+      grad.addColorStop(i / 4, "rgb(" + rgb[0] + "," + rgb[1] + "," + rgb[2] + ")");
+    }
+    ctx.save();
+    ctx.fillStyle = grad;
+    ctx.fillRect(x, y, barW, barH);
+    ctx.strokeStyle = "#22303f";
+    ctx.strokeRect(x + 0.5, y + 0.5, barW - 1, barH - 1);
+    ctx.font = "9px ui-monospace, Consolas, monospace";
+    ctx.textBaseline = "top";
+    ctx.fillStyle = "#8697b4";
+    const title = T("wf.legend.title");
+    const tw = ctx.measureText(title).width;
+    ctx.fillText(title, Math.max(PAD.left, x - tw), y - 1);
+    ctx.restore();
   }
 
   function fitRange(payload) {
@@ -199,7 +270,9 @@ window.Pages.waterfall = (function () {
     ctx.font = "10px ui-monospace, Consolas, monospace";
     ctx.fillStyle = "#8697b4";
     ctx.textBaseline = "top";
-    ctx.fillText(band.label, x0, 4);
+    const rng = bandRange[band.id];
+    const label = rng ? band.label + "  " + Math.round(rng.lo) + "-" + Math.round(rng.hi) : band.label;
+    ctx.fillText(label, x0, 4);
     const lo = Number(band.lo_mhz) || 0;
     const hi = Number(band.hi_mhz) || 0;
     const ticks = 4;
@@ -481,11 +554,31 @@ window.Pages.waterfall = (function () {
         if (img[i] !== BG[0] || img[i + 1] !== BG[1] || img[i + 2] !== BG[2]) painted += 1;
       }
     }
+    const bandStats = [];
+    if (last && last.bands) {
+      last.bands.forEach((band, i) => {
+        const data = cells[i] || UNITY;
+        let nz = 0;
+        let sum = 0;
+        for (let k = 0; k < data.length; k++) {
+          if (data[k]) { nz += 1; sum += data[k]; }
+        }
+        bandStats.push({
+          id: band.id,
+          cells: data.length,
+          nonzero: nz,
+          ratio: data.length ? Math.round((nz / data.length) * 1000) / 1000 : 0,
+          mean: nz ? Math.round(sum / nz) : 0,
+          range: bandRange[band.id] ? [Math.round(bandRange[band.id].lo), Math.round(bandRange[band.id].hi)] : null,
+        });
+      });
+    }
     return {
       rows: (last && last.rows) || 0,
       sweeps: (last && last.sweeps) || 0,
       frames: (last && last.frames) || 0,
       bands: (last && last.bands && last.bands.length) || 0,
+      bandStats: bandStats,
       canvas: { w: fit ? fit.width : 0, h: fit ? fit.height : 0 },
       painted: total ? Math.round((painted / total) * 1000) / 10 : 0,
       range: range ? [Math.round(range.lo), Math.round(range.hi)] : null,

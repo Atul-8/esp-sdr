@@ -87,6 +87,9 @@ window.I18N = (function () {
       "scanbar.hint": "游标 = 正在读的窗；一段 = 一个频段，一小格 = 一个 20MHz 窗；扫到最右会回到最左继续下一轮",
       "scanbar.now": "当前 {center} MHz · 第 {at}/{total} 窗 · 第 {pass} 轮",
       "scanbar.noplan": "该模块没有声明扫描计划（scan_requests）— 画不出频段条",
+      "scanbar.heatLow": "冷（空）",
+      "scanbar.heatHigh": "热（挤）",
+      "scanbar.heatHint": "格子越亮 = 该窗历史占用越强（跨轮累积，相对码）",
       "scanbar.wait": "等待扫描计划…",
       "spectrum.title": "实时频谱（当前窗口）",
       "spectrum.hint": "横轴 = 频率（本窗口），纵轴 = 功率码（相对 dB 码，不是 dBm）；实线 = 当前帧，紫线 = 峰值保持",
@@ -126,8 +129,9 @@ window.I18N = (function () {
       "wf.card.wait": "等待数据",
       "wf.wait": "还没有数据：点顶部「开始」，或先跑 app/waterfall.py",
       "wf.map.title": "全频段时频瀑布",
-      "wf.map.hint": "横轴 = 频率（三个频段各自等宽显示，刻度按各自跨度）；纵轴 = 时间（自上而下变旧）",
+      "wf.map.hint": "横轴 = 频率（三个频段各自等宽显示，刻度按各自跨度）；纵轴 = 时间（自上而下变旧）；颜色 = 历史占用强度，每段按自己的 p5-p95 拉伸（段标题旁标出码值范围）",
       "wf.cursor.idle": "鼠标移到图上可读频率 / 功率码",
+      "wf.legend.title": "亮 = 挤（每段各自拉伸）",
       "wf.cursor": "{band} · {freq} · 功率码 {code} · 第 {row}/{rows} 行（+{t}）",
       "wf.report.title": "出图（PNG + HTML 翻页）",
       "wf.report.hint": "按缓冲里现有的帧渲染；要小时级历史请用 app/waterfall.py 读 SQLite",
@@ -460,6 +464,9 @@ window.I18N = (function () {
       "scanbar.hint": "Cursor = window being read; one block = one band, one cell = one 20MHz window; at the right edge it wraps back to the left for the next pass",
       "scanbar.now": "now {center} MHz · window {at}/{total} · pass {pass}",
       "scanbar.noplan": "This module declares no scan plan (scan_requests) — cannot draw a band bar",
+      "scanbar.heatLow": "cold (idle)",
+      "scanbar.heatHigh": "hot (busy)",
+      "scanbar.heatHint": "brighter cell = that window has been busier over time (accumulated across passes, relative codes)",
       "scanbar.wait": "waiting for scan plan…",
       "spectrum.title": "Live spectrum (current window)",
       "spectrum.hint": "X = frequency (this window), Y = power code (relative dB code, not dBm); solid = current frame, purple = peak hold",
@@ -499,8 +506,9 @@ window.I18N = (function () {
       "wf.card.wait": "waiting for data",
       "wf.wait": "No data yet — press Start, or run app/waterfall.py first",
       "wf.map.title": "All-band time/frequency waterfall",
-      "wf.map.hint": "X = frequency (three bands, equal width, own ticks); Y = time (older downwards)",
+      "wf.map.hint": "X = frequency (three bands, equal width, own ticks); Y = time (older downwards); colour = how busy that cell has been, each band stretched by its own p5-p95 (code range printed next to the band label)",
       "wf.cursor.idle": "Move the mouse over the plot to read frequency / code",
+      "wf.legend.title": "brighter = busier (each band stretched on its own)",
       "wf.cursor": "{band} · {freq} · code {code} · row {row}/{rows} (+{t})",
       "wf.report.title": "Render report (PNG + paged HTML)",
       "wf.report.hint": "Renders what is in the ring buffer; use app/waterfall.py for hour-scale SQLite history",
@@ -817,6 +825,11 @@ window.I18N = (function () {
   function apply(root) {
     const scope = root && root.querySelectorAll ? root : document;
     scope.querySelectorAll("[data-i18n]").forEach((node) => {
+      // **只写叶子节点**：`#scanbar` 这类容器本身带 data-i18n 当"等待中"占位文案，
+      // 里面装的却是 JS 现场画的 <canvas>。在这里无脑 textContent = 文本，会把
+      // canvas（连同 WebGL 上下文、已累积的热力/瀑布）整个删掉 —— 表现就是
+      // 「切一下语言，扫频进度图就空着了」。有元素子节点的一律跳过。
+      if (node.firstElementChild) return;
       const text = t(node.dataset.i18n);
       if (text !== undefined) node.textContent = text;
     });

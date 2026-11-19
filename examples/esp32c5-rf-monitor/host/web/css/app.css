@@ -394,3 +394,12 @@ pre.raw { margin: 0; font: 11px/1.45 var(--mono); color: var(--fg); white-space:
   white-space: nowrap;
   padding-left: 10px;
 }
+
+/* 扫频进度条下方的热力说明（scanbar.js 自己画格子/图例，这行是文字解释） */
+.scanbar__note {
+  margin-top: 2px;
+  font-size: 11px;
+  color: #6e8099;
+  opacity: .9;
+  line-height: 1.35;
+}

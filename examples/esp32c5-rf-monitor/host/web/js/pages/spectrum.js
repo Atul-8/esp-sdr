@@ -19,7 +19,6 @@ window.Pages.spectrum = (function () {
   let spec = null;          // {canvas, ctx, width, height, dpr}
   let scanbar = null;       // 扫频进度条（游标）
   let info = null;          // 最近一次 info（含各模块的扫描计划）
-  let planModule = null;    // 扫描计划当前对应的模块 id
   let wf2d = null;          // 见 makeWaterfall()
   let waterfall3d = null;
   let peak = null;
@@ -64,7 +63,6 @@ window.Pages.spectrum = (function () {
     waterfall3d = null;
     if (scanbar) scanbar.dispose();
     scanbar = null;
-    planModule = null;
     wf2d = null;
     root = null;
   }
@@ -222,52 +220,21 @@ window.Pages.spectrum = (function () {
 
   // ---- 扫描计划（来自 Python 的 scan_requests，前端不写死频段）-------------
   /**
-   * 进度条只跟**一个**模块的计划（第一个有计划的模块，registry 按 id 排序 → 稳定）。
-   * 早期是"谁发帧就跟谁"，两个模块（waterfall / wifi_check）计划不同 → 每帧都换计划、
-   * 游标乱跳、`visited` 每帧被清空（实测 8 s 只记到 1 个窗）。
+   * 进度条要画**全频段**：把 `info.plans` 里所有模块的计划一起交给 ScanBar，
+   * 由它做并集、按模块认领自己的频点。早期只跟「最宽的那一个模块」，
+   * 结果是别的模块（wifi 2412 / 抓档 5180 / 守卫 5745）扫到的窗在这张图上
+   * 根本没有格子，用户看到的就是「没在扫全频段」。
    */
-  function applyPlan(moduleId) {
+  function applyPlan() {
     if (!scanbar || !info) return;
     const plans = info.plans || {};
-    const ids = Object.keys(plans);
-    if (!ids.length) return;
-    const id = planModule || (moduleId && plans[moduleId] ? moduleId : widestPlan(plans));
-    if (id === planModule) return;
-    planModule = id;
-    scanbar.setPlan(id, plans[id]);
-  }
-
-  /** 取覆盖跨度最大的计划（并列时按模块 id 排序，保证稳定）。
-   *
-   * 为什么不取 `ids[0]`：那是字典序第一个，`ble_risk` 只扫 2.4G 的 8 个窗，
-   * 拿它当「全频段进度」会把 5G 整段从条上抹掉（自检 `scanbar_bands` 就是这么发现的）。
-   * 进度条要回答的是「整个轮扫走到哪了」，所以跟最宽的计划。
-   */
-  function widestPlan(plans) {
-    let best = null;
-    let bestSpan = -1;
-    Object.keys(plans).sort().forEach((id) => {
-      const windows = plans[id] || [];
-      if (!windows.length) return;
-      let lo = Infinity;
-      let hi = -Infinity;
-      windows.forEach((w) => {
-        const center = Number(w[0]) || 0;
-        const bw = Number(w[1]) || 0;
-        lo = Math.min(lo, center - bw / 2);
-        hi = Math.max(hi, center + bw / 2);
-      });
-      if (hi - lo > bestSpan) {
-        bestSpan = hi - lo;
-        best = id;
-      }
-    });
-    return best || Object.keys(plans)[0];
+    if (!Object.keys(plans).length) return;
+    scanbar.setPlans(plans);
   }
 
   function onInfo(payload) {
     info = payload;
-    applyPlan(planModule);
+    applyPlan();
   }
 
   // ---- 数据入口 ----------------------------------------------------------
@@ -282,10 +249,9 @@ window.Pages.spectrum = (function () {
       for (let i = 0; i < peak.length; i++) peak[i] = Math.max(payload.bins[i], peak[i] - PEAK_DECAY);
     }
 
-    // 别的模块的帧不喂进度条：频点对不上本计划，只会让游标来回跳
-    if (scanbar && (!planModule || !payload.module || payload.module === planModule)) {
-      scanbar.update(payload);
-    }
+    // 所有模块的帧都喂进度条：ScanBar 内部按「该模块自己的计划窗」认领，
+    // 对不上就只更新频点文字、不动游标（不会像早期那样来回跳）。
+    if (scanbar) scanbar.update(payload);
     if (waterfall3d && waterfall3d.ok) waterfall3d.push(payload.bins);
     pushWaterfall(payload);
     drawWaterfall2D(payload);

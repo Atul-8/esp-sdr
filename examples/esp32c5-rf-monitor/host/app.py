@@ -1126,11 +1126,18 @@ def run_selftest(app: QApplication, view: QWebEngineView, window: HostWindow, ar
             "canvas_drawn": len(drawn) > 0,
             # 2D 瀑布（坏过的那块）：画布要有内容 + 缓冲里「一帧一行」真的在累积，
             # 且最新几行比未填充的老行亮（= 旧行确实在下移，不是原地覆盖/拉伸）
+            # 2D 瀑布在动：画过的行几乎都互不相同（冻住的话 distinctRows 会只有个位数），
+            # 且最新一行真的有亮度。
+            # 注意**不能**用「最上一行比最下一行亮 100 码」当判据：缓冲区扫满之后最下面
+            # 一行也是真数据（老行只是滚出去，不会被压暗），这个差值会自己失效 —— 实测
+            # mock 跑久一点 bottomMean 从 33 涨到 189，检查就假红了。
             "waterfall_2d": (
                 float(wf.get("nonBlack", 0)) > 0.05
                 and int(wf_probe.get("frames", 0) or 0) > 10
-                and int(wf_probe.get("distinctRows", 0) or 0) >= int(wf_probe.get("frames", 0) or 0) * 0.9
-                and int(wf_probe.get("topMean", 0) or 0) > int(wf_probe.get("bottomMean", 0) or 0) + 100
+                and int(wf_probe.get("paintedRows", 0) or 0) >= 8
+                and int(wf_probe.get("distinctRows", 0) or 0)
+                >= max(8, int(wf_probe.get("paintedRows", 0) or 0) * 0.8)
+                and int(wf_probe.get("topMean", 0) or 0) > 20
                 and not wf_probe.get("imagesTooMany")
             ),
             # 扫频进度条：至少切出两个频段（2.4G / 5G），游标在轨道内、已走过多个窗
@@ -1153,6 +1160,27 @@ def run_selftest(app: QApplication, view: QWebEngineView, window: HostWindow, ar
             "scanbar_wrap": int(bar_wrap.get("passesAfterWrap", 0) or 0) == 2
             and int(bar_wrap.get("visitedAfterWrap", 0) or 0) == 1
             and int(bar_wrap.get("indexAtEnd", -1)) == 3,
+            # 全频段并集：地图要把**所有模块**的计划合起来画（2.4G + 5G 低 + 5G 高），
+            # 早期只跟单个模块 → 别的模块扫到的窗在图上没有格子，看着像"没扫全频段"
+            # 注意 5G 常是**一段**：wifi_check 的 49 个窗把 5160~5845 连成一片，
+            # 中间没有 >3 倍窗宽的空档，分成两段反而是错的。这里守的是「2.4G 和 5G
+            # 都在、且 5G 这一段一直画到 5.7 GHz 以上」（= 5G HIGH 没被地图漏掉）。
+            "scanbar_union": (
+                len(bar_groups) >= 2
+                and int(bar.get("windows", 0) or 0) >= 60
+                and any(str((g or {}).get("name", "")) == "2.4G" for g in bar_groups)
+                and any(
+                    float((g or {}).get("lo", 0) or 0) > 5e9 and float((g or {}).get("hi", 0) or 0) >= 5.7e9
+                    for g in bar_groups
+                )
+            ),
+            # 历史热力：格子底色跨轮累积（第二轮把同窗抬 20 码，热力必须上升而不是重置）
+            "scanbar_heat": (
+                int(bar.get("hot", 0) or 0) >= 3
+                and bool(bar_wrap.get("heatRose"))
+                and sum(int((b or {}).get("hot", 0) or 0) for b in (bar.get("perBand") or []))
+                == int(bar.get("hot", 0) or 0)
+            ),
             # 语言切换：中文 → English，导航与状态栏都要跟着变
             "i18n_switch": i18n.get("lang") == "en" and any("Live spectrum" in str(x) for x in nav),
             # 外壳文案（含扫频进度条）真的翻了英文，level 数据值仍走显示层映射
@@ -1252,6 +1280,13 @@ def run_selftest(app: QApplication, view: QWebEngineView, window: HostWindow, ar
             "waterfall_cards": int(wf_page.get("cards", 0) or 0) >= 4,
             "waterfall_banner": int(wf_page.get("banner", 0) or 0) > 20,
             "waterfall_notes": int(wf_page_probe.get("notes", 0) or 0) >= 3,
+            # 三个频段都要有数据且都画得出来（每段非零格占比 >= 50%）：
+            # 「5G HIGH 一片黑」既可能是没数据，也可能是共用一条拉伸范围被压暗了
+            "waterfall_bands": (
+                len([b for b in (wf_page_probe.get("bandStats") or [])
+                     if float((b or {}).get("ratio", 0) or 0) >= 0.5]) >= 3
+                and all((b or {}).get("range") for b in (wf_page_probe.get("bandStats") or []))
+            ),
             "waterfall_sweep": str(wf_page.get("sweep", "")).endswith(" s"),
             # 单射频分时：瀑布图必须真拿到射频时间，不能被别的模块饿死。
             # 门槛按「本仓当前模块数的公平份额」算（5 模块 0.17 → 判 ≥0.17），
@@ -1497,7 +1532,10 @@ def run_selftest(app: QApplication, view: QWebEngineView, window: HostWindow, ar
             )
 
         view.page().runJavaScript("Popout.selftest()")
-        QTimer.singleShot(1600, read_out)
+        # selftest 内部是 0 → 700ms(放大) → +500ms(关)，共 1.2s；这里留 2.4s 读结果。
+        # 原来只留 1600ms，偏偏界面在真板高频刷新时 setTimeout 会被推迟，读到 close=null
+        # 就误报「关闭没复位」——这是读数太早，不是功能坏了。
+        QTimer.singleShot(2400, read_out)
 
     def collect_popout(result: object, then) -> None:
         try:
