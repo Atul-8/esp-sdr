@@ -17,6 +17,8 @@ host/
 ├── tests/test_session.py  # 25 条无窗口自测（含页面门控 2 条）
 ├── tests/test_l10n.py     # 英文界面零中文（10 场景 × 全部下行出口 + ASCII 页）
 ├── tests/probe_popout.py  # 弹窗切页行为快速探针（20 s 出结果，迭代弹窗逻辑用它）
+├── tests/probe_verdict_ui.py  # BLE 结论条渲染探针（中英双语，15 s 出结果）
+├── store_throttle.py  # 落库节流：同窗最大保持合并，换窗/1 s 才落盘（别让一窗 60 帧堵住采集）
 └── web/
     ├── index.html     # 唯一入口：顶栏 + 导航 + #page-container + 页脚
     ├── css/app.css    # 暗色仪表盘主题
@@ -56,7 +58,7 @@ python host/app.py --mock --scenario wifi_busy
 python host/app.py --selftest --seconds 10 --shot out.png
 python host/app.py --selftest --real --port COM56 --gain-index 60 --seconds 12
 python host/app.py --selftest --seconds 10 --mock --engine device   # 设备自扫引擎
-#    → 报告末尾 "checks": 52 项全 true，退出码 0（host / device 两条引擎都验过）
+#    → 报告末尾 "checks": 53 项全 true，退出码 0（host / device 两条引擎都验过）
 #    ⚠️ 别把 --seconds 压到 8：页面探针没跑完，画布/瀑布那几项会假红
 #    ⚠️ 自检会真的切一次语言并逐页扫 DOM：`en_no_cjk` / `en_keys_complete` 红了就是英文界面
 #       里漏了中文。三种修法，按现场选：
