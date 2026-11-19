@@ -82,6 +82,7 @@ class SweepSource:
         self.frames = 0
         self.misses = 0
         self.fallbacks = 0
+        self.reopens = 0
         self.last_error = ""
 
     # ---- 生命周期 --------------------------------------------------------
@@ -143,7 +144,12 @@ class SweepSource:
         key = sweep_key(request.freq_hz)
         if key not in self._keys:
             self.fallbacks += 1
-            yield from self.link.scan(request)
+            if self.running:
+                # 设备自扫期间串口只有一个读者（读线程）。这里直接 link.scan()
+                # 会变成两个读者同时读，帧必被切歪 → 先停扫、扫完再恢复。
+                yield from self.pause_around(lambda: list(self.link.scan(request)))
+            else:
+                yield from self.link.scan(request)
             return
         if not self.running:
             self.start()  # 懒启动：第一片才开始扫，避免开机就白吐帧
@@ -165,6 +171,18 @@ class SweepSource:
                 snap = self.link.read_sweep_frame(timeout_s=0.2)
             except Exception as exc:  # noqa: BLE001 - 读失败不能把线程打死
                 self.last_error = f"read: {type(exc).__name__}: {exc}"
+                # 链路被判失效（帧错位）时自己重同步一次：core 的 failed 标记
+                # 永不复位，不重开的话设备自扫就再也不出帧了。
+                reopen = getattr(self.link, "reopen", None)
+                if getattr(self.link, "failed", False) and callable(reopen):
+                    try:
+                        if reopen():
+                            self.link.set_sweep_plan(self.windows)
+                            self.link.start_sweep(self.bins, self.rate_code, self.detector)
+                            self.last_error = ""
+                            self.reopens += 1
+                    except Exception as again:  # noqa: BLE001
+                        self.last_error = f"reopen: {type(again).__name__}: {again}"
                 time.sleep(0.05)
                 continue
             if snap is None:
@@ -210,6 +228,7 @@ class SweepSource:
             "frames": self.frames,
             "misses": self.misses,
             "fallbacks": self.fallbacks,
+            "reopens": self.reopens,
             "cached": len(self._cache),
             "last_error": self.last_error,
         }

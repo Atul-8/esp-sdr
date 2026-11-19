@@ -232,5 +232,59 @@ class SessionTests(unittest.TestCase):
             self.assertIn("device", item)
 
 
+class RelinkTests(unittest.TestCase):
+    """串口被判失效后 session.relink() 能把采集救回来（现场：跑一会儿提示断开串口）。"""
+
+    def setUp(self):
+        self.session = HostSession(bins_out=64)
+        self.session.open(HostConfig.from_json(to_json({"mock": True, "scenario": "wifi_busy"})))
+
+    def tearDown(self):
+        self.session.close()
+
+    def test_scan_heals_itself_when_link_fails(self):
+        """链路被判失效后，下一次 scan() 自己重同步 —— 用户不用做什么。"""
+        before = self.session.step(0.5).snapshots
+        self.assertGreater(before, 0)
+        self.session.link.failed = True  # 模拟真板帧错位
+        after = self.session.step(0.5)
+        self.assertEqual(after.source_errors, 0, "自愈成功就不该记成采集错误")
+        self.assertGreater(after.snapshots, 0, "自愈之后必须继续出帧")
+        self.assertFalse(self.session.link.failed)
+        self.assertEqual(self.session.link.reopen_count, 1, "自愈应当留下重开次数")
+
+    def test_relink_recovers_when_auto_heal_is_blocked(self):
+        """自动重同步被冷却/拔线挡住时，session.relink() 是最后一道手动恢复。"""
+        link = self.session.link
+        original = link.reopen
+        link.reopen = lambda *a, **k: False  # 冷却中：自动重同步暂时不生效
+        link.failed = True
+        broken = self.session.step(0.5)
+        self.assertGreater(broken.source_errors, 0, "失效链路应当被如实记成错误")
+        link.reopen = original
+        healed = self.session.relink()
+        self.assertTrue(healed["ok"], healed)
+        self.assertFalse(link.failed, "重同步后失效标记必须清掉")
+        self.assertIn("已重新同步", healed["message"])
+        after = self.session.step(0.5)
+        self.assertEqual(after.source_errors, broken.source_errors, "恢复后不该再有新错误")
+        self.assertGreater(after.snapshots, 0, "恢复后必须继续出帧")
+
+    def test_relink_without_session_is_reported(self):
+        self.session.close()
+        result = self.session.relink()
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["message"], "链路已关闭时也要给一句能显示的话")
+
+    def test_relink_messages_are_bilingual(self):
+        for key in ("relink_ok", "relink_failed", "relink_closed"):
+            self.assertIn(key, MESSAGES["zh"])
+            self.assertIn(key, MESSAGES["en"])
+            self.assertFalse(
+                any(ord(ch) > 127 for ch in MESSAGES["en"][key]),
+                f"{key} 的英文文案不能带非 ASCII",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

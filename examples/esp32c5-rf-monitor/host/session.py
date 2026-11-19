@@ -28,6 +28,7 @@ SRC_DIR = str(paths.ensure_on_path())
 from core.registry import Output, Registry, discover  # noqa: E402 - 必须先 ensure_on_path
 from core.scheduler import Scheduler, SchedulerStats  # noqa: E402
 from core.serial_link import EspSdrLink  # noqa: E402
+from link_guard import ResilientLink  # noqa: E402
 from core.snapshot import Snapshot  # noqa: E402
 from core.sweep_source import SweepLinkFacade, SweepSource, sweep_key  # noqa: E402
 from tests.fake_firmware import FakeFirmware  # noqa: E402
@@ -69,6 +70,9 @@ MESSAGES: dict[str, dict[str, str]] = {
         "already_running_log": "[打开失败] {message}",
         "gain_no_session": "还没开始采集：点「开始」后再调增益",
         "audit_failed": "体检失败",
+        "relink_ok": "[串口] 已重新同步（第 {n} 次），继续采集",
+        "relink_failed": "[串口] 重同步失败：{error}",
+        "relink_closed": "[串口] 链路已关闭，无法重同步",
     },
     "en": {
         "probe_only": "No functional module in modes/ yet — using the link probe to verify the board",
@@ -86,6 +90,9 @@ MESSAGES: dict[str, dict[str, str]] = {
         "already_running_log": "[Open failed] {message}",
         "gain_no_session": "Not collecting yet — press Start before changing gain",
         "audit_failed": "Audit failed",
+        "relink_ok": "[Serial] Re-synchronised (attempt {n}) - collecting continues",
+        "relink_failed": "[Serial] Re-sync failed: {error}",
+        "relink_closed": "[Serial] Link already closed - cannot re-sync",
     },
 }
 
@@ -316,7 +323,9 @@ class HostSession:
             )
         else:
             factory = None
-        self.link = EspSdrLink(config.port, config.baudrate, factory=factory)
+        # ResilientLink = EspSdrLink + 命令前排空残留帧 + 失效后自动重同步
+        # （见 host/link_guard.py；core/ 的协议解析一个字不动）
+        self.link = ResilientLink(config.port, config.baudrate, factory=factory)
         self.link.open()
         mode = config.gain_mode or ("MANUAL" if config.gain_index is not None else "HARDWARE")
         self.gain = GainControl(
@@ -385,6 +394,52 @@ class HostSession:
         self.started_at = time.time()
         self.last_error = ""
         return self.describe()
+
+    def relink(self) -> dict[str, Any]:
+        """串口被判失效后重同步：重开链路 → 重设增益 →（自扫模式下）重建自扫。
+
+        为什么要这一步：``core/serial_link.py`` 一旦置 ``failed = True`` 就**永不复位**
+        （``open()`` 也不复位），之后每个 ``scan()`` 都抛「连接已标记失效」，
+        上层只能自动停机 —— 现场表现就是「跑一会儿提示断开串口，只能重启上位机」。
+        这里不改 core 的判据，只在外围重开串口：``ResilientLink.reopen()`` 会
+        重新 SYNC、重读 CAPS、并把失效标记清掉。
+
+        返回 ``{"ok": bool, "message": str, "count": int}``；失败不抛，让 RF 线程
+        照常走「连续失败自动停机」那条路。
+        """
+        link = self.link
+        if link is None:
+            return {"ok": False, "message": tr(self.lang, "relink_closed"), "count": 0}
+        sweeping = self.sweep is not None
+        if sweeping:
+            # 先让设备停扫：重开串口时设备还在吐帧的话，SYNC 又会读歪
+            try:
+                self.sweep.stop()
+            except Exception:  # noqa: BLE001 - 停不下来也要重开
+                pass
+        try:
+            ok = link.reopen()
+        except Exception as exc:  # noqa: BLE001 - 重开失败如实回报
+            return {"ok": False, "message": error_text(self.lang, exc), "count": 0}
+        if not ok:
+            # 冷却中（串口可能真被拔了）：不算失败，让 RF 线程停一会儿再试
+            return {"ok": False, "message": "", "count": 0}
+        try:
+            if self.config is not None and not self.config.mock and self.gain is not None:
+                self.gain.apply(link)
+        except Exception:  # noqa: BLE001 - 增益设不上不该挡住恢复
+            pass
+        if sweeping:
+            try:
+                self.sweep.start()
+            except Exception as exc:  # noqa: BLE001
+                return {
+                    "ok": False,
+                    "message": error_text(self.lang, exc),
+                    "count": getattr(link, "reopen_count", 0),
+                }
+        count = int(getattr(link, "reopen_count", 0) or 0)
+        return {"ok": True, "message": tr(self.lang, "relink_ok", n=count), "count": count}
 
     def close(self) -> None:
         # 自扫先停：别让设备在链路关掉之后还在往串口吐帧

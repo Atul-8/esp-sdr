@@ -114,6 +114,10 @@ PAGE_MODULES: dict[str, tuple[str, ...] | None] = {
 }
 #: 连续失败多少个时间片就自动停机（core 目前没有退避，应用层兜底）
 MAX_CONSECUTIVE_ERRORS = 5
+#: 串口重同步冷却中（多半是真被拔了）就歇这么久再试，别原地空转
+REOPEN_RETRY_SLEEP_S = 3.0
+#: 一次采集里最多重同步几次（防止真坏了的链路无限重连刷日志）
+MAX_RELINKS = 20
 MOCK_FRAMES_PER_WINDOW = 2  # 假固件每个窗口吐 2 帧（tests/fake_firmware.py 的约定）
 
 
@@ -353,6 +357,7 @@ class Runner(QThread):
         last_epoch = int(self.view.get("epoch", 0) or 0)
         consecutive_errors = 0
         seen_errors = 0
+        relinks = 0
 
         pace = self._mock_pace()
 
@@ -410,8 +415,24 @@ class Runner(QThread):
                             self.last_error = message
                             bridge.log.emit(tr(self.lang, "rf_error", message=message))
                         if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+                            # 先把串口重同步一次再判死：core 的 scan() 一旦置 failed
+                            # 就永不复位，不重开的话现场只能重启上位机。
+                            healed = session.relink() if relinks < MAX_RELINKS else {}
+                            if healed.get("ok"):
+                                consecutive_errors = 0
+                                relinks += 1
+                                bridge.log.emit(str(healed.get("message") or ""))
+                                continue
+                            reason = str(healed.get("message") or "")
+                            if not reason and relinks < MAX_RELINKS:
+                                # 冷却中：串口可能真被拔了，歇一下再来，不算停机
+                                time.sleep(REOPEN_RETRY_SLEEP_S)
+                                consecutive_errors = MAX_CONSECUTIVE_ERRORS - 1
+                                continue
+                            reason = reason or message
+                            bridge.log.emit(tr(self.lang, "relink_failed", error=reason))
                             bridge.log.emit(
-                                tr(self.lang, "auto_stop", n=consecutive_errors, message=message)
+                                tr(self.lang, "auto_stop", n=consecutive_errors, message=reason)
                             )
                             break
                     else:

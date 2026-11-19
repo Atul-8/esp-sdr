@@ -610,6 +610,61 @@ epo\examples\esp32c5-rf-monitor`；`ESPSDR_SRC=/tmp` 正确抛错 |
 
 ---
 
+## [REVIEW] 7.2 串口自保：命令前排空 + 失效自愈
+
+**人类反馈**：手动启动上位机后，**周期瀑布图页跑一会儿提示「断开串口」**，
+并猜测是「状态机 / 换页调度」把链路搞坏的，建议改成实时频谱页那套调度。
+
+### 先查证，再动手
+
+| 查证 | 结果 |
+| --- | --- |
+| 是否与换页状态机有关 | **不是**。默认引擎 `host` 下压根不跑固件 FSM（方案 A 的 `scan_fsm.c` 只在 `--engine device` 生效）；60 s 真板自检里换页 6 次、400+ 窗，`device.frames 144 / misses 0`，**没掉链** |
+| 掉链只有哪些入口 | `core/serial_link.py` 全场只有 **2 处**置 `failed = True`：帧 magic 对不上、帧解码失败 |
+| 为什么「只有瀑布页」 | 瀑布页是唯一让人愿意长时间盯着看的页面（一轮 44 窗 ≈ 4.4 s，累积 240 行）；掉链概率约 **1/400~1/600 个窗**，看得越久越容易撞上，与页面调度无关 |
+| 撞上之后为什么只能重启 | `EspSdrLink.open()` **不复位** `failed`，`scan()` 见 `failed` 直接抛「连接已标记失效」→ RF 循环连续 5 片失败 → 自动停机 → 界面「未连接」 |
+
+根因链：一窗 `SPEC` 的 `SPECEND` 之后设备仍可能吐收尾帧（`drops` 非 0 时更明显）→
+主机没读干净 → 下一条文本命令（`FREQ`/`GAIN`/`SPEC`）的 `readline()` 把二进制帧当行读掉
+→ 随后的 `_read_exact(4)` 落在帧中间 → magic 不匹配 → `failed = True` → **永久死链**。
+
+### 修法（不动 `core/` 的判据与解析）
+
+| 位置 | 改了什么 |
+| --- | --- |
+| `host/link_guard.py`（新） | `ResilientLink(EspSdrLink)`：① 每条文本命令 `_write()` 前把读缓冲残留排空；② `scan()` 发现 `failed` 就先 `reopen()`（重开串口 + 重握手 + 复位失效标记），带 3 s 冷却防原地空转；③ `reopen_count` / `last_reopen_at` 可被界面/自检读到 |
+| `host/session.py` | 链路换成 `ResilientLink`；新增 `relink()`：停自扫 → 重开链路 → **重设增益** → 重建自扫，返回 `{ok, message, count}`；补 `relink_ok/failed/closed` 中英文案 |
+| `host/app.py` | RF 循环「连续失败 → 自动停机」之前先 `session.relink()`：成功就清零续跑并打一行日志，冷却中就歇 3 s 再试，真失败才停机（单次采集最多 20 次，防刷日志） |
+| `core/sweep_source.py` | ① 修「计划外频点」的**双读者** bug：自扫期间 `scan()` 直接读串口会和 drain 线程抢，改成 `pause_around`；② drain 线程读到 `failed` 时自行 `reopen()` 并重发计划；③ `stats()` 增加 `reopens` |
+| `host/l10n.py` | 顺带补 `无覆盖/有覆盖/未采样`（真板安静频段会出现「无覆盖」档，假场景不触发） |
+
+**为什么重开后必须重设增益**：真板重开串口会 DTR 复位设备，`GAIN?` 回到 `GAIN HARDWARE -1`。
+`relink()` 里 `self.gain.apply(link)` 就是为了不留半死状态（实测见下第 3 行）。
+
+### 验收材料 → 实测
+
+| 项 | 命令 | 结果 |
+| --- | --- | --- |
+| 真板自保探针 | `python testing/probe_resilient.py --windows 24` | **`[OK]`**：24 窗 **1751 帧 / 2.9 s / 失败 0**（证明排空不打坏正常扫描）；`failed=True` 后 `scan()` **自动重开并出 66 帧**、`reopen_count 0→1`、`failed=False`；重开后 `5180 MHz / bins 512 / status 0` 正常 |
+| 重设增益的必要性 | 同上第 3 行 | 重开后 `GAIN?` → `GAIN HARDWARE -1 0 81 0`（已回落 AGC）→ 证明 `relink()` 里必须补 `gain.apply()` |
+| 单测（新） | `cd host && python tests/test_link_guard.py -v` | **6 tests OK**：残留必被排空、空缓冲不动、无端口不炸、失效自愈、冷却防热循环、重开失败仍留 `failed` |
+| 单测（session 级） | `cd host && python tests/test_session.py -v` | **29 tests OK**（原 25 + 3 条 relink + 1 条双语文案）：`failed` 后**下一次 `step()` 自愈**、`source_errors` 不上升；自动自愈被冷却挡住时 `relink()` 能救回并使 `source_errors` 不再增长 |
+| 全套回归 | `python -m unittest discover -s tests -t .`（分析层） | **280 tests OK（65.2 s）** |
+| 真板 GUI 自检 | `cd host && python app.py --selftest --real --port COM56 --gain-index 60 --seconds 12` | **`EXIT=0`，`ok:true`，`checks 52/52` 全绿**；`en_cjk.hitCount 0`、`missing 0`；`device.frames 146 / misses 0 / distinct 90` |
+| 假固件自检（设备自扫） | `python app.py --selftest --mock --engine device --seconds 10` | **`EXIT=0`，52/52 全绿**；`device.frames 101 / misses 0 / distinct 90` |
+
+### 边界
+
+1. **真拔线只能如实报错**：`reopen()` 失败会保留 `failed` 并返回失败，RF 循环照常「连续失败自动停机」，
+   不会假装在采集；冷却期内不会原地狂重试；
+2. **自愈会丢一窗数据**：重开串口要 1~3 s，那个窗的帧拿不回来（瀑布图会缺一格，不补）；
+3. **不改 `core/` 判据**：`serial_link.py` 的解析与错误分类一个字没动，改动只在 host 侧包装 +
+   方案 A 的 `sweep_source.py`（其双读者属实现 bug，非判据）；
+4. `--engine device` 下自扫掉链的自愈靠 `reopen()` + 重发计划，真断线仍由上层「自动停机」兜底。
+
+
+---
+
 ## 阻塞与需求
 
 - **应用侧健壮性缺口**（真机实测暴露，属 `core/scheduler.py`）：一次扫描失败会把链路

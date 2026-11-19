@@ -9,6 +9,7 @@ JSON），界面全部在 `web/` 里的 HTML/CSS/JS。
 ```
 host/
 ├── app.py             # Qt 外壳：QWebEngineView + QWebChannel 桥 + 采集线程 + --selftest
+├── link_guard.py      # 串口自保：命令前排空残留帧 + 失效后自动重同步（core/ 不动）
 ├── session.py         # 纯 Python 逻辑层（无 Qt，可单独测）：配置校验 / 会话 / 频谱打包
 ├── start.bat          # Windows 双击启动（缺依赖自动装）
 ├── requirements.txt   # PySide6 + pyserial
@@ -64,7 +65,10 @@ python host/app.py --selftest --seconds 10 --mock --engine device   # 设备自�
 #         · 异常文案（`[RF error] …`）→ 补 ERROR_PHRASES 片段，界面侧走 session.error_text()
 #       前端静态词条则补 web/js/i18n.js 的 en 词典。真板才会出现的档位，必须跑 --real 才验得到。
 
-# 4) 指定窗口尺寸（验「窗口态也不裁按钮」）
+# 4) 串口自保探针（真板；验证「命令前排空」不打坏扫描 + 失效后自动重同步）
+cd .. && python testing/probe_resilient.py --windows 24     # 期望 [OK]
+
+# 5) 指定窗口尺寸（验「窗口态也不裁按钮」）
 python host/app.py --mock --window-size 1024x680
 
 # 逻辑层自测（不开窗口）
