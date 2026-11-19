@@ -461,6 +461,8 @@
       tablesSeen: state.tablesSeen,
       running: state.running,
       statusText: (document.getElementById("status") || {}).textContent || "",
+      // 代码版本戳：自检据此证明「页面拿到的是当前这一版代码」，而不是上一个进程
+      codeStamp: (document.getElementById("code-stamp") || {}).textContent || "",
       navLabels: Array.from(document.querySelectorAll("#nav .nav-item")).map((b) => b.textContent),
       canvases: canvases,
       pageProbe: page && page.mod && page.mod.probe ? page.mod.probe() : null,

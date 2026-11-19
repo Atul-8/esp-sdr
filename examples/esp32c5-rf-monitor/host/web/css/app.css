@@ -384,3 +384,13 @@ pre.raw { margin: 0; font: 11px/1.45 var(--mono); color: var(--fg); white-space:
   flex: 0 0 auto;
 }
 .popout--paused .popout__stage { opacity: 0.55; }
+
+/* 代码版本戳：一眼区分「新代码」和「上一个进程」 */
+#code-stamp {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: #7c8794;
+  opacity: .75;
+  white-space: nowrap;
+  padding-left: 10px;
+}

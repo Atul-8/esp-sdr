@@ -58,7 +58,7 @@ python host/app.py --mock --scenario wifi_busy
 python host/app.py --selftest --seconds 10 --shot out.png
 python host/app.py --selftest --real --port COM56 --gain-index 60 --seconds 12
 python host/app.py --selftest --seconds 10 --mock --engine device   # 设备自扫引擎
-#    → 报告末尾 "checks": 53 项全 true，退出码 0（host / device 两条引擎都验过）
+#    → 报告末尾 "checks": 54 项全 true，退出码 0（host / device 两条引擎都验过）
 #    ⚠️ 别把 --seconds 压到 8：页面探针没跑完，画布/瀑布那几项会假红
 #    ⚠️ 自检会真的切一次语言并逐页扫 DOM：`en_no_cjk` / `en_keys_complete` 红了就是英文界面
 #       里漏了中文。三种修法，按现场选：

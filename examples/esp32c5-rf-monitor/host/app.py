@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
 import time
 
@@ -50,6 +51,45 @@ from session import (  # noqa: E402
 
 #: 分析层目录（core/ modes/ 所在）。找不到会在这里就抛明确的错误。
 SRC_DIR = paths.ensure_on_path()
+
+#: 界面/控制台一律显示「现在跑的是哪一版代码」。
+#:
+#: 为什么需要它：改完代码但窗口是**上一个进程**（QWebEngine 在 load 时就把 JS 装进内存），
+#: 表现是「明明改了却没生效」，两边都看不到异常。这一行时间戳是唯一能当场对齐的证据。
+def code_stamp() -> str:
+    """最近一次改动 host/ 下界面或代码的时间 + git 短哈希（拿不到就只给时间）。"""
+    host_dir = os.path.dirname(os.path.abspath(WEB_DIR))
+    newest, newest_name = 0.0, ""
+    for base, _dirs, names in os.walk(host_dir):
+        for name in names:
+            if not name.endswith((".py", ".js", ".html", ".css", ".json")):
+                continue
+            path = os.path.join(base, name)
+            try:
+                mtime = os.path.getmtime(path)
+            except OSError:
+                continue
+            if mtime > newest:
+                newest, newest_name = mtime, os.path.relpath(path, host_dir)
+    when = time.strftime("%m-%d %H:%M:%S", time.localtime(newest)) if newest else "?"
+    sha = ""
+    try:
+        out = subprocess.run(
+            ["git", "-C", os.path.dirname(os.path.dirname(host_dir)), "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=3,
+        )
+        sha = (out.stdout or "").strip()
+        if sha:
+            # 工作区有未提交改动就标 +local：一眼看出「磁盘上这份比 git 里的新」
+            dirty = subprocess.run(
+                ["git", "-C", os.path.dirname(os.path.dirname(host_dir)), "status", "--porcelain", "--", host_dir],
+                capture_output=True, text=True, timeout=3,
+            )
+            if (dirty.stdout or "").strip():
+                sha += "+local"
+    except (OSError, subprocess.SubprocessError):
+        sha = ""
+    return f"{when} · {sha or 'nogit'} · {newest_name or '-'}"
 
 class ConsolePage(QWebEnginePage):
     """把前端 console 输出打到 Python 的 stdout：网页出错时不用开 DevTools 也能查。
@@ -640,6 +680,20 @@ class HostWindow(QObject):
     def _on_load_finished(self, ok: bool) -> None:
         self.page_loaded = bool(ok)
         self.bridge.state.emit(to_json({"state": "ui-loaded" if ok else "ui-load-failed"}))
+        if ok:
+            # 勘误：这一段绝不能影响界面启动——戳只用于自证「跑的是哪一版」
+            try:
+                stamp = code_stamp()
+                self.stamp = stamp
+                self.view.page().runJavaScript(
+                    "(function(){var e=document.getElementById('code-stamp');"
+                    "if(e)e.textContent=" + json.dumps("code " + stamp) + ";})()",
+                    0,
+                )
+                print("[code] " + stamp + "  <- 页脚应显示同一时间戳；不一致就是旧进程", flush=True)
+            except Exception as exc:  # noqa: BLE001 - 戳失败不许拖垮界面
+                self.stamp = ""
+                print(f"[code] 版本戳计算失败：{exc}", flush=True)
         if not ok:
             print("[ui] 页面加载失败", flush=True)
 
@@ -1241,6 +1295,9 @@ def run_selftest(app: QApplication, view: QWebEngineView, window: HostWindow, ar
             and int((report.get("en_cjk") or {}).get("hitCount", 1) or 0) == 0,
             "en_keys_complete": bool((report.get("en_cjk") or {}).get("pages"))
             and int((report.get("en_cjk") or {}).get("missingCount", 1) or 0) == 0,
+            # 页脚版本戳：证明「页面拿到的是当前这一版代码」。戳空 = 跑的是旧进程/旧文件，
+            # 那后面所有检查的对象都不对——所以这条必须排在报告最前面看。
+            "code_stamp": bool(str((report["pages"].get("spectrum") or {}).get("codeStamp", "")).strip()),
         }
         # 设备自扫引擎（方案 A）单独验一遍：跑假固件 1.2 s，必须有帧。
         # 放在这里是因为它不依赖窗口，也不需要用户点任何东西。

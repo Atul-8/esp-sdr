@@ -56,6 +56,7 @@ window.I18N = (function () {
       "kv.realMode": "真机",
 
       "foot.next": "下一步：真机跑一遍同名场景（python host/app.py --port COM56 --gain-index 60）",
+      "foot.stampTitle": "这个窗口正在跑的代码版本；比磁盘上的文件旧就说明是上一个进程，重启才有新代码",
       "foot.nextMock": "现在看的是假固件数据；接板上真机见 host/README.md",
 
       "log.ready": "桥已就绪（window.backend 可用）",
@@ -428,6 +429,7 @@ window.I18N = (function () {
       "kv.realMode": "real board",
 
       "foot.next": "Next: run the same scenario on the real board (python host/app.py --port COM56 --gain-index 60)",
+      "foot.stampTitle": "Code version this window is running; older than the files on disk means a stale process - restart to pick up new code",
       "foot.nextMock": "Showing fake-firmware data; see host/README.md for the real board",
 
       "log.ready": "Bridge ready (window.backend available)",
