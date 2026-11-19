@@ -95,14 +95,25 @@ window.Router = (function () {
     // 放最后：这时候浮层已经挂回来了，一次就能覆盖两边。
     if (window.I18N) I18N.apply(host);
     if (window.Popout) Popout.refreshTitle();
-    // 告诉 Python 侧「我现在停在这一页」：射频线程只算这一页要的模块
-    // （前端不显示的页不该占 CPU、也不该抢射频时间片；见 host/app.py PAGE_MODULES）
-    if (window.Bridge && Bridge.ready()) {
-      try {
-        Bridge.call("setView", JSON.stringify({ page: pageId, win: window.__winTag || "main" }))
-          .catch(() => {});
-      } catch (err) { /* 老版本没有这个槽，忽略 */ }
-    }
+    reportView();
+  }
+
+  /**
+   * 告诉 Python 侧「我这个窗口现在停在哪一页」：射频线程只算这一页要的模块
+   * （前端不显示的页不该占 CPU、也不该抢射频时间片；见 host/app.py PAGE_MODULES）。
+   *
+   * **首屏必须由 app.js 在桥就绪后再喊一次**：``init()`` 里的第一次 navigate
+   * 跑在 ``Bridge.init()`` 之前，这时 ``Bridge.ready()`` 还是 false，上报会被丢掉，
+   * Python 侧就以为「没人停在频谱页」→ 一帧 spectrum 都不推，页面永远停在那儿等
+   * （实测真板：扫频进度条不动、曲线不更新）。
+   */
+  function reportView() {
+    if (!current) return;
+    if (!(window.Bridge && Bridge.ready())) return;
+    try {
+      Bridge.call("setView", JSON.stringify({ page: current.id, win: window.__winTag || "main" }))
+        .catch(() => {});
+    } catch (err) { /* 老版本没有这个槽，忽略 */ }
   }
 
   /** 把桥事件转给当前页（页面只实现自己关心的那几个） */
@@ -128,6 +139,7 @@ window.Router = (function () {
   return {
     init,
     navigate,
+    reportView,
     dispatch,
     relabel,
     get current() { return current; },

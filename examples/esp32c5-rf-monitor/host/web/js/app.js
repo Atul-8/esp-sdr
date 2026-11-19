@@ -52,6 +52,9 @@
 
     // ---- 桥就绪后拉一次本机串口/场景清单 ----
     Bridge.init(async () => {
+      // 首屏那次 navigate 跑在桥就绪之前，setView 会被丢掉 → 这里补报一次，
+      // 否则射频线程认为「没人在看频谱页」，首屏永远等不到数据。
+      if (window.Router) Router.reportView();
       await applyHostDefaults();
       await loadPorts();
       await loadScenarios();
