@@ -750,6 +750,66 @@ epo\examples\esp32c5-rf-monitor`；`ESPSDR_SRC=/tmp` 正确抛错 |
   （`.data/waterfall/waterfall-p1.png` 三段都有内容：亮像素 24g 14.5% / 5gl 9.6% / 5gh 7.4%，
   最亮 177 ⇒ 后端 ring 里 5gh 确实有数据，问题在染色与降级，不在采集）。
 
+## [DOING] 8 圆屏本地面板（feat/8-round-display）
+
+**需求**（人类原话）：「给开发板接入了 xiao 生态的一个圆形触摸屏，想要做一个整合的设置页面，
+然后点击进去就可以打开我们现在上位机的这些图，频谱热图、3D 热图等。关于刷新率问题，
+基于双缓冲 + DMA 的 pingpong 缓冲模式，注意好状态机和消息队列，别触发竞争了。」
+
+**硬件**（已核实，详见 `docs/10-round-display.md`）：GC9A01 240×240 RGB565 + CHSC6X 触摸（I2C 0x2e）。
+引脚经 XIAO ESP32-C5 映射落定：SCK=GPIO8、MISO=GPIO9、MOSI=GPIO10、CS=GPIO0、
+DC=GPIO7、BL=GPIO11、TOUCH_INT=GPIO12、SDA=GPIO23、SCL=GPIO24。
+来源：`Seeed_Arduino_RoundDisplay-main/src/lv_xiao_round_screen.h` + TFT_eSPI `Setup66_Seeed_XIAO_Round.h`
++ micropython `SEEED_XIAO_ESP32C5/pins.csv`（三处互相印证）。
+
+### 三处必须先解决的冲突
+
+| # | 冲突 | 结论 |
+|---|---|---|
+| C1 | `CONFIG_ESP_SDR_UART_TX_PIN=11` / `RX_PIN=12` 撞 **BL** 与 **触摸 INT** | 关掉 `CONFIG_ESP_SDR_UART_ENABLED`。已 grep 确认它被 6 处 `#if` 包着（`burst_serial.c` 3 处、`burst_gpio.c` 1 处、4 个 target 的 `receiver.c` 各 1 处），关掉干净；`burst_gpio.c` 也因此不再 reserve 这两个脚 |
+| C2 | **GPIO7 是 strapping pin**，被 DC 占用 | 上电电平由屏模块决定 → 可能影响启动模式。**必须实测**（连续上电 20 次）；失败则需飞线把 DC 挪走，属硬件改动，要人类拍板 |
+| C3 | GPIO25（D2）也是 strapping | 本方案不用 D2，保持空置 |
+
+### 并发设计（人类点名要求的三件事）
+
+1. **双缓冲 + DMA ping-pong** → 不做全屏双缓冲（240×240×2×2 = **230,400 B**，C5 只有 400 KB SRAM，
+   还要跑 WiFi 混杂 + FFT + 串口）。改为**条带 ping-pong**：24 行 × 240 × 2 = 11,520 B × 2 = **23,040 B**，
+   由 `esp_lcd_panel_draw_bitmap` 的 `on_color_trans_done` 驱动换块。
+2. **不设共享 framebuffer** —— 每个视图实现 `render_band(view, dst, y0, rows)`，纯函数按行渲染，
+   ping-pong 语义退化成「两条独立绘制任务」，从根上消除「两份画布不一致」。
+3. **状态机** —— `ST_BOOT/ST_MENU/ST_VIEW/ST_SETTINGS` 单一枚举 + 一张 `TR[state][event]` 转移表，
+   不写散落的 if。
+4. **消息队列** —— `q_spectrum`（射频→UI，元素 72 B 只放 64 bin 摘要，深度 4，满则丢最旧）
+   与 `q_touch`（触摸→UI，深度 8，满则丢新）。
+5. **所有权表**（防竞争的核心）：SPI 总线只有 `ui_task` 能碰，I2C 只有 `touch_task` 能碰，
+   射频侧两边都不碰；三条硬禁令 —— ① 禁止在 `on_color_trans_done`（ISR 上下文）里渲染，
+   ② 禁止两个任务同时 `draw_bitmap`，③ 禁止 UI 任务直接调 `scan_fsm_*`（设置项必须走与 PC 命令
+   同一个入口，受「只在两次扫描之间改参数」约束）。
+
+### 分阶段验收
+
+| 阶段 | 判据 |
+|---|---|
+| 8.1 驱动点亮 | 屏上真出三色条；关 UART 后 PC 侧 `SPEC` 扫频全功能回归通过；连续上电 20 次正常 |
+| 8.2 触摸 + 菜单 | 点 6 格都能进/能回；圆外点击无反应；`tap_ok/tap_drop` 计数正确 |
+| 8.3 频谱 + 瀑布 | 20 fps 稳定；`dma_wait_us < band_render_us`（证明重叠成功）；PC 侧窗率降幅 < 10% |
+| 8.4 3D 热图 + WiFi/BLE 页 | 逐行投影不掉帧 |
+| 8.5 并发压测 | 30 min 无死机、无堆泄漏、无丢帧尖峰 |
+
+### 待人类确认（阻塞 8.1 动代码）
+
+1. **屏是不是插在这块 ESP32-C5 上**（XIAO 座直插）？若接在另一块板而靠串口拿数据，方案要重写。
+2. **UART 桥可以关吗**？关掉后 `CONFIG_ESP_SDR_UART_*` 那套能力失效（PC 侧本来只走 USB/COM56）。
+3. **菜单项对不对**？现排 6 格：`频谱 / 热图 / 3D热图 / WiFi / BLE / 设置`；抓档没排进去（屏上无意义）。
+
+### 边界（诚实标注）
+
+- **未写一行固件代码**：本轮只做硬件核实 + 设计定稿 + 冲突排查。所有刷新率数字都是**纸面估算**，
+  尚未实测（`ui_stats` 打点后才有真数字）。
+- **不引 LVGL / Arduino 运行时**：本工程是 IDF v6.1，arduino-esp32 v3.x 绑 IDF 5.x，版本风险高；
+  且要画的是逐像素波形与热图，不是控件树。GC9A01 初始化序列自己写，零第三方依赖。
+- 屏上不做 IQ 抓档、不做中文（内置点阵只有 ASCII，4 MB flash 留给固件）。
+
 ## 阻塞与需求
 
 - **应用侧健壮性缺口**（真机实测暴露，属 `core/scheduler.py`）：一次扫描失败会把链路
