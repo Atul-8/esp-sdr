@@ -725,6 +725,31 @@ epo\examples\esp32c5-rf-monitor`；`ESPSDR_SRC=/tmp` 正确抛错 |
 - 真板 `--selftest --real --port COM56 --seconds 12` **53/53 全绿**（含 `en_no_cjk` 6 页 0 条、缺 key 0）；
 - `python testing/chk_l10n.py` 残留 0 / 骨架 0 / 缺条目 0 / 占位不符 0。
 
+### 7.4 上位机「5G HIGH 看不到」+ 全功能并行（feat/7-fsm）
+
+用户报障 + 诉求：①扫频进度图上 5G HIGH 有热力、周期瀑布图上 5G HIGH 是空的 ——
+「肯定有一个以上的热力图在说假话」；②既然按 nginx「一份数据多个消费者」改，就别再按切页裁剪功能。
+
+| # | 根因 | 修法 |
+|---|------|------|
+| A | **染色口径让有信号的那段变黑**：`fitBandRanges()` 用 p5..p95 两端拉伸。一段里只要有强信号，p95 就被抬到信号上，底噪全挤到最暗（真板 5G HIGH 底噪 29 码、峰 186 码 ⇒ 底噪只剩 2% 亮度）→ 整段看着像"没扫到"；而没信号的 2.4G 反而满屏花色（跨度只有 8 码） | `waterfall.js` 改成**以本段 p10 底噪为 0 点、+30 码满亮**（`SPAN_CODES`），与后端 `ref_db` 取 p10 的口径一致 |
+| B | **降级时只画最后一行**：一轮没扫满时 `web_payload()` 退回 `rows[-1:]`，而窗按频率顺序扫、高段排最后 ⇒ 那一行的高段永远空 | 改成画最近**两**行 + payload 加 `degraded`，高段上一轮的数据能显示出来 |
+| C | 用户分不清「没数据」和「数据太暗」 | 段标题旁标 `底噪 N · 峰 M`；整段无有效格时画「本段暂无可视数据」；`probe()` 新增 `bright/brightRatio/ref/peak` |
+| D | **按页裁剪模块**：`PAGE_MODULES` + `needed_modules()` 只算当前页的模块，切页会改射频调度节拍（真板实测掉到 0.37 窗/秒），切回来数据还是断的 | `needed_modules()` 恒全量、`wants_spectrum()` 恒 True；`PAGE_MODULES` 删除；自检两条改判据（`view_gating` = 每条留档 `modules` 数 = 模块总数且跨两页；`spectrum_gating` = 停在非频谱页时频谱帧计数仍涨） |
+
+- **验证（本轮，假固件 `--selftest --seconds 15`）**：**57/57 全绿**、`ok: true`；
+  瀑布页 `probe.bandStats`：`24g ref 28 / peak 128 / bright 76%`、`5gl ref 28 / peak 62 / 13%`、
+  `5gh ref 30 / peak 123 / 6%`（真板 5.8G 图传在 mock 里本来就只占少数窗，峰比底噪高 93 码 ⇒ 满亮红）；
+  `table_views` 60 条留档全部 `modules` = 5 个、跨 spectrum/waterfall/wifi/ble/capture/raw 六页；
+  `spectrum_on_ble 617 → spectrum_after 624`（非频谱页仍在推）。
+- **回归**：全量 **285 OK**；`test_session.py` 29 OK、`test_l10n.py` 24 OK、
+  `test_waterfall.py` 20 OK、`test_sweep_session.py` 9 OK、`test_port_lock.py` 7 OK；
+  `chk_l10n.py` 0/0/0/0；`node --check` 全过。
+- **未验证（诚实标注）**：**真板未复测** —— COM56 被用户正在跑的 GUI 实例占着
+  （`PermissionError(13)`），本轮画面证据来自假固件自检 + 用户自己出的真板 PNG
+  （`.data/waterfall/waterfall-p1.png` 三段都有内容：亮像素 24g 14.5% / 5gl 9.6% / 5gh 7.4%，
+  最亮 177 ⇒ 后端 ring 里 5gh 确实有数据，问题在染色与降级，不在采集）。
+
 ## 阻塞与需求
 
 - **应用侧健壮性缺口**（真机实测暴露，属 `core/scheduler.py`）：一次扫描失败会把链路

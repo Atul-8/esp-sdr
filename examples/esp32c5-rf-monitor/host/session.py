@@ -29,6 +29,7 @@ from core.registry import Output, Registry, discover  # noqa: E402 - 必须先 e
 from core.scheduler import Scheduler, SchedulerStats  # noqa: E402
 from core.serial_link import EspSdrLink  # noqa: E402
 from link_guard import ResilientLink  # noqa: E402
+import port_lock  # 本地模块：同一串口只允许一个上位机实例采集（见 host/port_lock.py）
 from core.snapshot import Snapshot  # noqa: E402
 from core.sweep_source import SweepLinkFacade, SweepSource, sweep_key  # noqa: E402
 from tests.fake_firmware import FakeFirmware  # noqa: E402
@@ -287,6 +288,8 @@ class HostSession:
     sweep: Any = field(init=False, default=None, repr=False)
     engine: str = field(init=False, default="host")
     engine_note: str = field(init=False, default="")
+    #: 本进程占着的串口（``host/port_lock.py`` 的坑）；空 = 没占
+    _lock_port: str = field(init=False, default="", repr=False)
 
     def __post_init__(self) -> None:
         self.registry, self.notes = build_registry()
@@ -325,8 +328,21 @@ class HostSession:
             factory = None
         # ResilientLink = EspSdrLink + 命令前排空残留帧 + 失效后自动重同步
         # （见 host/link_guard.py；core/ 的协议解析一个字不动）
+        # 同一串口只允许一个实例采集：两个窗口同时开会互相抢口，被顶掉的那个表面上
+        # "还在跑"（扫频地图是累积状态），但瀑布图再也拼不出一行（真板踩过，见
+        # host/port_lock.py 抬头）。mock 不碰硬件，不用占坑。
+        if not config.mock:
+            port_lock.acquire(config.port)
+            self._lock_port = config.port
         self.link = ResilientLink(config.port, config.baudrate, factory=factory)
-        self.link.open()
+        try:
+            self.link.open()
+        except Exception:
+            # 打不开端口就把坑放掉，否则界面报错后锁还留着，用户重试会被自己挡住
+            if self._lock_port:
+                port_lock.release(self._lock_port)
+                self._lock_port = ""
+            raise
         mode = config.gain_mode or ("MANUAL" if config.gain_index is not None else "HARDWARE")
         self.gain = GainControl(
             mode=mode,
@@ -481,6 +497,10 @@ class HostSession:
         self.link = None
         self.scheduler = None
         self.store = None
+        # 坑最后放：链路真关了再让别的实例进来，否则对方 open 到一半又会抢
+        if self._lock_port:
+            port_lock.release(self._lock_port)
+            self._lock_port = ""
 
     # ---- 抓档 ------------------------------------------------------------
     def _link_capture(self, freq_hz: int, samples: int, rate_code: int, bits: int) -> Any:

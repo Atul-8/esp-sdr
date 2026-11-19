@@ -542,6 +542,10 @@ TABLE: dict[str, str] = {
 #: 异常文案里常混着固件回显和数字，骨架对不上，改按「已知中文片段」换；
 #: 片段之外剩下的 ASCII 尾巴（数字、``SPEC``/``FSM`` 之类）原样保留。
 ERROR_PHRASES: list[tuple[str, str]] = [
+    ("端口 ", "port "),
+    ("已经被另一个上位机实例占用，pid ", "is already held by another host instance, pid "),
+    ("：同一个端口同时只能有一个窗口采集，请关掉那个窗口或换成别的端口再点开始",
+     ": only one window can capture a port at a time - close the other one (or pick another port) and press start again"),
     ("连接已标记失效，请重新打开", "the link was marked dead, reopen the port"),
     ("串口读取超时（无数据）", "serial read timeout (no data)"),
     ("无法取得串口租约（SYNC 未回显）", "could not take the serial lease (no SYNC echo)"),

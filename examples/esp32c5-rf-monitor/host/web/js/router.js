@@ -99,13 +99,14 @@ window.Router = (function () {
   }
 
   /**
-   * 告诉 Python 侧「我这个窗口现在停在哪一页」：射频线程只算这一页要的模块
-   * （前端不显示的页不该占 CPU、也不该抢射频时间片；见 host/app.py PAGE_MODULES）。
+   * 告诉 Python 侧「我这个窗口现在停在哪一页」——**只用于记录与调试**。
    *
-   * **首屏必须由 app.js 在桥就绪后再喊一次**：``init()`` 里的第一次 navigate
-   * 跑在 ``Bridge.init()`` 之前，这时 ``Bridge.ready()`` 还是 false，上报会被丢掉，
-   * Python 侧就以为「没人停在频谱页」→ 一帧 spectrum 都不推，页面永远停在那儿等
-   * （实测真板：扫频进度条不动、曲线不更新）。
+   * 采集与计算是全功能并行的（所有模块一直在算、频谱帧一直推），切页不影响它们；
+   * 见 host/app.py 的 ``needed_modules()``。
+   *
+   * **首屏仍需由 app.js 在桥就绪后再喊一次**：``init()`` 里的第一次 navigate
+   * 跑在 ``Bridge.init()`` 之前，这时 ``Bridge.ready()`` 还是 false，上报会被丢掉；
+   * 自检的 ``view_gating`` 就是看这份留档，缺了它就没证据。
    */
   function reportView() {
     if (!current) return;

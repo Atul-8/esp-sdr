@@ -273,12 +273,18 @@ class WaterfallMonitor(ModePlugin):
         # 只画**扫满**的轮次；一轮都还没扫满时（刚开跑）才退回画当前轮，并把缺口如实标出来。
         complete = [sweep for sweep in rows if len(sweep) >= self._windows]
         pending = 0
+        degraded = False
         if complete:
             if rows and len(rows[-1]) < self._windows:
                 pending = len(rows[-1])
             rows = complete[-WEB_ROWS:]
         elif rows:
-            rows = rows[-1:]
+            # 一轮都还没扫满（刚开跑，或者轮次被打断）。
+            # 老实现只画最后一行 = 当前轮，而窗按频率顺序扫、高段排在最后，
+            # 于是「最新一行」的高段永远是空的 —— 用户会以为频段丢了（真板实测就是这么报的）。
+            # 现在至少画最近**两**行：当前轮 + 上一轮，高段上一轮扫到的数据就能显示出来。
+            degraded = True
+            rows = rows[-2:] if len(rows) >= 2 else rows[-1:]
         grids = {band.id: blank_grid(len(rows), WEB_COLS) for band in BANDS}
         cache: dict[Any, Any] = {}
         for index, sweep in enumerate(rows):
@@ -326,6 +332,8 @@ class WaterfallMonitor(ModePlugin):
             # 当前这轮已经扫了多少窗（还没扫满就画不成一行）；前端据此显示进度，不画空行
             "pending_windows": pending,
             "rows_complete": bool(complete),
+            # 降级：没有扫满的轮，画的是最近两行（高段可能是上一轮的）
+            "degraded": degraded,
             "bands": bands,
             "cover": self.band_summary(),
         }

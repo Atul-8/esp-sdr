@@ -19,6 +19,13 @@ window.Pages.waterfall = (function () {
   const GAP = 12;                 // 三个频段之间的缝
   const BG = [8, 10, 16];         // 未扫到 / 背景色（与 PNG 的 Canvas 底色一致）
   const UNITY = new Uint8Array(0);
+  //: 每段以**本段 p10 底噪**为 0 点，高出底噪 SPAN_CODES 码即满亮。
+  //: 为什么不用 p5..p95 两端拉伸：一段里只要有强信号，p95 就被抬到信号上，
+  //: 底噪全挤到最暗 → 整段看着像"没扫到"（真板 5G HIGH 就是这么被看成空白的：
+  //: p10 底噪 29 码、信号到 186，按 p5..p95 拉伸后底噪只剩 2% 亮度）。
+  //: 底噪口径与后端判据一致（core/classifier 的 ref_db 取 p10）。
+  const SPAN_CODES = 30;
+  const REF_PCT = 0.10;
 
   let root = null;
   let canvas = null;
@@ -27,7 +34,8 @@ window.Pages.waterfall = (function () {
   let layout = null;              // {x0, segW, y0, dataH, cols, rows, cellW, cellH}
   let cells = [];                 // 每个频段一份 Uint8Array（已 base64 解码）
   let range = null;               // {lo, hi}：全图拉伸范围（平滑跟随，避免闪）
-  const bandRange = {};           // 每段自己的 {lo, hi}：段内拉伸，见 fitBandRanges()
+  const bandRange = {};           // 每段自己的 {ref}：本段底噪基准，见 fitBandRanges()
+  const bandMeta = {};            // 每段诊断：{ref, n, max} —— 画在段标题旁，好一眼看出有没有数据
   let hover = null;               // {band, col, row}
   let resizeTimer = null;
   let report = null;
@@ -148,6 +156,10 @@ window.Pages.waterfall = (function () {
       const x0 = Math.round(PAD.left + index * (segW + GAP));
       drawBand(ctx, band, cells[index], x0, PAD.top, segW, dataH, cols, rows);
       drawBandAxis(ctx, band, x0, segW, PAD.top + dataH + 4);
+      const meta = bandMeta[band.id];
+      if (meta && !meta.n) {
+        centreTextIn(ctx, x0, PAD.top, segW, dataH, T("wf.band.emptyBox"));
+      }
     });
     drawLegend(ctx, W, H);
     drawTimeAxis(ctx, payload, PAD.top, dataH);
@@ -178,11 +190,17 @@ window.Pages.waterfall = (function () {
     ctx.strokeRect(x0 + 0.5, y0 + 0.5, w - 1, h - 1);
   }
 
-  /** 0 码 = 没扫到（最暗底色）；否则按给定拉伸范围映射到同一条热力色带 */
+  /**
+   * 0 码 = 没扫到（最暗底色）；否则按「高出本段底噪多少码」映射到热力色带。
+   *
+   * 底噪 → 最暗，底噪 + SPAN_CODES → 满亮，中间线性。这样：
+   *   - 各段之间视觉一致：谁的底噪高就整体平移，不会因为"这段没信号"反而更花；
+   *   - 和判据口径一致（后端相对抬升也是拿 p10 底噪当参考）。
+   */
   function colorFor(code, rng) {
     if (!code) return BG;
-    const r = rng || range || { lo: 0, hi: 255 };
-    const t = (code - r.lo) / (r.hi - r.lo || 1);
+    const ref = (rng && typeof rng.ref === "number") ? rng.ref : 0;
+    const t = (code - ref) / SPAN_CODES;
     return U.heatRGB(Math.max(0, Math.min(1, t)));
   }
 
@@ -206,7 +224,9 @@ window.Pages.waterfall = (function () {
         n += 1;
       }
       if (!n) {
-        // 这一轮这段真的没扫到：保留上一次的范围，别把颜色跳成一片黑
+        // 这一轮这段真的没扫到：保留上一次的底噪基准，别把颜色跳成一片黑；
+        // 但诊断信息要如实清零 —— 段标题上会写出「本段暂无可视数据」
+        bandMeta[band.id] = { ref: bandRange[band.id] ? Math.round(bandRange[band.id].ref) : 0, n: 0, max: 0 };
         return;
       }
       const pick = (frac) => {
@@ -218,12 +238,18 @@ window.Pages.waterfall = (function () {
         }
         return 255;
       };
-      const next = { lo: pick(0.05), hi: pick(0.95) };
-      if (next.hi - next.lo < 8) next.hi = next.lo + 8;
+      const ref = pick(REF_PCT);
       const prev = bandRange[band.id];
-      bandRange[band.id] = prev
-        ? { lo: prev.lo + (next.lo - prev.lo) * 0.3, hi: prev.hi + (next.hi - prev.hi) * 0.3 }
-        : next;
+      const smooth = prev && typeof prev.ref === "number"
+        ? prev.ref + (ref - prev.ref) * 0.3
+        : ref;
+      bandRange[band.id] = { ref: smooth };
+      // 诊断用：非零格数 / 最大值 —— 段标题旁标出来，"没数据"和"数据太暗"就分得清了
+      let mx = 0;
+      for (let v = 255; v > 0; v--) {
+        if (hist[v]) { mx = v; break; }
+      }
+      bandMeta[band.id] = { ref: Math.round(smooth), n: n, max: mx };
     });
   }
 
@@ -270,8 +296,14 @@ window.Pages.waterfall = (function () {
     ctx.font = "10px ui-monospace, Consolas, monospace";
     ctx.fillStyle = "#8697b4";
     ctx.textBaseline = "top";
-    const rng = bandRange[band.id];
-    const label = rng ? band.label + "  " + Math.round(rng.lo) + "-" + Math.round(rng.hi) : band.label;
+    const meta = bandMeta[band.id];
+    let label = band.label;
+    if (meta) {
+      // 有值：底噪 / 最大值；没值：直接说这段没有可视数据（不要去猜）
+      label += meta.n
+        ? "  " + T("wf.band.meta", { ref: meta.ref, max: meta.max })
+        : "  " + T("wf.band.empty");
+    }
     ctx.fillText(label, x0, 4);
     const lo = Number(band.lo_mhz) || 0;
     const hi = Number(band.hi_mhz) || 0;
@@ -347,6 +379,16 @@ window.Pages.waterfall = (function () {
     ctx.lineWidth = 1;
     ctx.strokeRect(Math.round(cx) - 3.5, layout.y0 + 0.5, 7, layout.dataH);
     ctx.strokeRect(x + 0.5, Math.round(cy) - 0.5, layout.segW, 1);
+  }
+
+  function centreTextIn(ctx, x0, y0, w, h, text) {
+    ctx.save();
+    ctx.font = "11px ui-monospace, Consolas, monospace";
+    ctx.fillStyle = "rgba(134,151,180,.85)";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(text, x0 + w / 2, y0 + h / 2);
+    ctx.restore();
   }
 
   function centreText(ctx, W, H, text) {
@@ -465,7 +507,11 @@ window.Pages.waterfall = (function () {
         total: last.windows || 0,
       }),
       T("wf.notes.cover", { cover: cover }),
-      T("wf.notes.code", { lo: Math.round(last.code_lo || 0), hi: Math.round(last.code_hi || 0) }),
+      T("wf.notes.code", {
+        lo: Math.round(last.code_lo || 0),
+        hi: Math.round(last.code_hi || 0),
+        span: SPAN_CODES,
+      }),
       T("wf.notes.png"),
     ];
     const partial = incompleteRows(last);
@@ -558,10 +604,16 @@ window.Pages.waterfall = (function () {
     if (last && last.bands) {
       last.bands.forEach((band, i) => {
         const data = cells[i] || UNITY;
+        const ref = bandRange[band.id] ? bandRange[band.id].ref : 0;
         let nz = 0;
         let sum = 0;
+        let bright = 0;   // 高出底噪 1/4 满亮跨度的格数 —— 这格"看得见"就是靠它
         for (let k = 0; k < data.length; k++) {
-          if (data[k]) { nz += 1; sum += data[k]; }
+          const v = data[k];
+          if (!v) continue;
+          nz += 1;
+          sum += v;
+          if ((v - ref) / SPAN_CODES > 0.25) bright += 1;
         }
         bandStats.push({
           id: band.id,
@@ -569,7 +621,14 @@ window.Pages.waterfall = (function () {
           nonzero: nz,
           ratio: data.length ? Math.round((nz / data.length) * 1000) / 1000 : 0,
           mean: nz ? Math.round(sum / nz) : 0,
-          range: bandRange[band.id] ? [Math.round(bandRange[band.id].lo), Math.round(bandRange[band.id].hi)] : null,
+          bright: bright,
+          brightRatio: data.length ? Math.round((bright / data.length) * 1000) / 1000 : 0,
+          // range 保持 [lo, hi] 形状（老探针/浸泡脚本读它）：lo = 本段底噪基准，hi = 满亮码
+          range: bandRange[band.id]
+            ? [Math.round(bandRange[band.id].ref), Math.round(bandRange[band.id].ref) + SPAN_CODES]
+            : null,
+          ref: bandMeta[band.id] ? bandMeta[band.id].ref : null,
+          peak: bandMeta[band.id] ? bandMeta[band.id].max : null,
         });
       });
     }

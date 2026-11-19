@@ -14,7 +14,7 @@ host/
 ├── start.bat          # Windows 双击启动（缺依赖自动装）
 ├── requirements.txt   # PySide6 + pyserial
 ├── l10n.py            # 下行文案本地化：中文串骨架匹配 → 英文模板（翻不到原样返回）
-├── tests/test_session.py  # 25 条无窗口自测（含页面门控 2 条）
+├── tests/test_session.py  # 29 条无窗口自测（含全量并行 2 条）
 ├── tests/test_l10n.py     # 英文界面零中文（10 场景 × 全部下行出口 + ASCII 页）
 ├── tests/probe_popout.py  # 弹窗切页行为快速探针（20 s 出结果，迭代弹窗逻辑用它）
 ├── tests/probe_verdict_ui.py  # BLE 结论条渲染探针（中英双语，15 s 出结果）
@@ -98,25 +98,25 @@ Windows 上也可以双击 `host/start.bat`（缺依赖会自动 `pip install`�
    ```
    然后在 `index.html` 的 `<script>` 列表里加一行（这是唯一的 Python 之外的手工步骤）。
 4. 没写 JS 也能跑：`raw` 页面会把任何模块的 `Output` 表格渲染出来。
-5. **告诉 Python 这一页要算哪些模块**：在 `app.py` 的 `PAGE_MODULES` 里加一行
-   `"<id>": ("<模块 id>",)`（见下节「页面门控」）。不登记就按「全量」算——能跑，但白算。
+5. 不用登记"这一页要算哪些模块"：**所有模块一直并行在算**（见下节）。
 
-## 页面门控（只看哪一页，就只算哪一页的账）
+## 全功能并行（一份数据，多个消费者）
 
-射频线程每轮 `session.step()` 都会产出五个模块的表格，而 `produce()` + `web_payload()`
-是真算一遍的。五页同时只显示一页，**全算 = 5 倍白工**，所以：
+射频线程每轮 `session.step()` 产出的帧会分发给**所有**模块，`session.tables()` 也每次都
+全量产出五个模块的表格；页面切换只影响显示，**不影响采集与计算**。
 
 | 位置 | 做了什么 |
 |---|---|
-| `web/js/router.js` | `navigate()` 末尾调 `Bridge.call("setView", {page, win})`，告诉 Python 这个窗口停在哪一页 |
-| `host/app.py` `Bridge.setView` | 写进 `HostWindow.view_box`（**普通 dict**，不是 QObject 属性），窗口标签区分主窗口/独立小窗，多窗口取**并集** |
-| `host/app.py` `needed_modules()` | 按 `PAGE_MODULES` 把并集翻成模块 id；含 `raw` 页（值 `None`）就全量 |
-| `host/app.py` `Runner` | 表格只 `session.tables(modules)`；`spectrum` 帧只在有人停在频谱页时才推；切页那一轮立刻补推一次，新页面不用干等 1 秒 |
-| `host/session.py` `tables(modules)` | 只对给定 id 调 `produce()`；响应里回一个 `modules` 字段（`None` = 全量），自检据此证明「不是发了没算」 |
+| `web/js/router.js` | `navigate()` 末尾调 `Bridge.call("setView", {page, win})` —— 只用于记录"谁在看哪页"和调试 |
+| `host/app.py` `Bridge.setView` | 写进 `HostWindow.view_box`（**普通 dict**，不是 QObject 属性），窗口标签区分主窗口/独立小窗 |
+| `host/app.py` `needed_modules()` | **恒返回全部模块**（不再按页面裁剪） |
+| `host/app.py` `Runner` | `tables` 每周期全量推；`spectrum` 帧一直推（频谱页与所有浮层共用一份） |
+| `host/session.py` `tables(modules)` | 传 `None` = 全量；`restrict_modules()` 仍在，但只给探针/测试用，**不接切页** |
 
-页面到模块的对照（`PAGE_MODULES`）：`spectrum: ()`（不吃表格，只要频谱帧）、
-`waterfall: ("waterfall",)`、`wifi: ("wifi_check",)`、`ble: ("ble_risk",)`、
-`capture: ("capture",)`、`raw: None`（全量）。
+为什么不再按页裁剪：实测切页会顺带改变射频线程的调度与 tables 节拍，吞吐反而掉下去
+（真板 `--selftest --engine device` 切页把窗率打到 0.37 窗/秒），而且切回来之前那一页
+的数据是断的。`view_gating` / `spectrum_gating` 两条自检就是盯着这个语义：
+留档里每条 `modules` 都必须等于模块总数，且停在非频谱页时频谱帧计数仍在涨。
 
 两条注意：
 

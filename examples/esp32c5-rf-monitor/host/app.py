@@ -140,18 +140,12 @@ TABLE_INTERVAL = 1.0
 #: 单个时间片长度（秒）：GUI 里 stop 的响应时间上限
 STEP_SECONDS = 0.35
 
-#: 页面 → 该页真正要用到的模块 id（``None`` = 全量）。
-#: 切到某页就只算这一页的模块（见 ``HostSession.tables(modules=...)``）：
-#: 前端不显示的页不该占 CPU，也不该抢射频线程的分析节拍。
-#: 新增页面 = 在 ``web/pages/registry.json`` 加一条 + 在这里登记它要的模块。
-PAGE_MODULES: dict[str, tuple[str, ...] | None] = {
-    "spectrum": (),               # 频谱页只吃 spectrum 帧，不吃任何模块表格
-    "waterfall": ("waterfall",),
-    "wifi": ("wifi_check",),
-    "ble": ("ble_risk",),
-    "capture": ("capture",),
-    "raw": None,                  # 原始输出：全量兜底
-}
+#: 全功能并行（nginx 式「一份数据多个消费者」）。
+#:
+#: 以前的实现按「当前停在哪个页面」裁剪模块：切页就只算那一页的模块。
+#: 实测这是错的：切页会顺带改变射频线程的调度与 tables 节拍，吞吐反而掉下去，
+#: 而且切回来之前那一页的数据是断的。现在所有模块一直在线，每次 tables() 全量产出，
+#: 前端各页按需取用；页面切换只影响显示，不再影响采集与计算。
 #: 连续失败多少个时间片就自动停机（core 目前没有退避，应用层兜底）
 MAX_CONSECUTIVE_ERRORS = 5
 #: 串口重同步冷却中（多半是真被拔了）就歇这么久再试，别原地空转
@@ -169,21 +163,13 @@ def wanted_pages(view: dict[str, object]) -> set[str]:
 
 
 def needed_modules(view: dict[str, object], all_ids: Iterable[str] = ()) -> list[str]:
-    """并集后真正要算的模块 id；含「原始输出」页（``None``）时返回全部。"""
-    ids: list[str] = []
-    for page in wanted_pages(view):
-        wanted = PAGE_MODULES.get(page, None)
-        if wanted is None:
-            return list(all_ids)
-        for mid in wanted:
-            if mid not in ids:
-                ids.append(mid)
-    return ids
+    """要算的模块 id —— **永远是全部**（全功能并行，不按页面裁剪）。"""
+    return list(all_ids)
 
 
 def wants_spectrum(view: dict[str, object]) -> bool:
-    """是否该推实时频谱帧：只有「实时频谱」页需要（它独占 spectrum 信号）。"""
-    return "spectrum" in wanted_pages(view)
+    """是否该推实时频谱帧 —— **永远是**（频谱帧同时喂「实时频谱」页与所有浮层）。"""
+    return True
 
 
 class Bridge(QObject):
@@ -447,17 +433,16 @@ class Runner(QThread):
                     snapshot = session.stats(stats)
                     self.box["stats"] = snapshot  # 收尾时 scheduler 已拆，自检靠这份留档
                     bridge.stats.emit(to_json(snapshot))
-                    # 空清单（只有「实时频谱」页在看）就别算了：这一页不吃任何模块表格
-                    if modules or epoch == 0:
-                        bridge.tables.emit(to_json(session.tables(modules or None)))
-                        # 留档：自检靠它证明「门控真的生效」，不是发了但没算
-                        views = self.box.setdefault("table_views", [])
-                        if isinstance(views, list):
-                            views.append(
-                                {"pages": sorted(wanted_pages(self.view)),
-                                 "modules": None if not modules else list(modules)}
-                            )
-                            del views[:-80]
+                    bridge.tables.emit(to_json(session.tables(modules or None)))
+                    # 留档：自检/浸泡靠它核对「全量并行」真的在跑（modules 恒为全部）
+                    views = self.box.setdefault("table_views", [])
+                    if isinstance(views, list):
+                        views.append(
+                            {"pages": sorted(wanted_pages(self.view)),
+                             "modules": None if not modules else list(modules),
+                             "total": len(self.module_ids)}
+                        )
+                        del views[:-80]
                 if stats is not None:
                     if stats.source_errors > seen_errors:
                         seen_errors = stats.source_errors
@@ -753,12 +738,19 @@ class HostWindow(QObject):
     def start_run(self, config_json: str) -> dict[str, object]:
         if self.runner is not None and self.runner.isRunning():
             return {"ok": False, "message": tr(self.lang, "already_running")}
+        session = None
         try:
             config = HostConfig.from_json(config_json)
             self.lang = config.lang
             session = HostSession(bins_out=config.bins_out)
             info = session.open(config)
         except Exception as exc:  # noqa: BLE001 - 打不开端口是最常见的用户错误
+            if session is not None:
+                # 半开的会话要收干净：串口占用锁、已打开的链路都别留着
+                try:
+                    session.close()
+                except Exception:  # noqa: BLE001 - 收尾失败不该盖住原始错误
+                    pass
             message = error_text(self.lang, exc)
             self.bridge.log.emit(tr(self.lang, "already_running_log", message=message))
             self.bridge.state.emit(to_json({"state": "error", "message": message}))
@@ -1315,14 +1307,16 @@ def run_selftest(app: QApplication, view: QWebEngineView, window: HostWindow, ar
             # 汇总型面板：先确认它**真的弹出来了**（否则「没弹」也能骗过这一条），再确认切页后关了
             "popout_static_closes": bool((pp.get("static_open_raw") or {}).get("open"))
             and not bool((pp.get("static_after_switch") or {}).get("open")),
-            # 页面门控：切到 wifi 页时表格**只算 wifi_check**；频谱帧在非频谱页不再推。
-            "view_gating": any(
-                list(v.get("pages") or []) == ["wifi"] and list(v.get("modules") or []) == ["wifi_check"]
+            # 全功能并行：页面切换**不再**裁剪模块 —— 每条留档的 modules 都是全部模块，
+            # 而且确实跨了两个不同页面（否则只是没切过页，证明不了并行）。
+            "view_gating": len({tuple(v.get("pages") or []) for v in (report.get("table_views") or [])}) >= 2
+            and all(
+                len(list(v.get("modules") or [])) == int(v.get("total", -1))
                 for v in (report.get("table_views") or [])
             ),
-            "spectrum_gating": int(pp.get("spectrum_on_ble", 0) or 0)
-            >= int(pp.get("spectrum_before", 0) or 0)
-            and int(pp.get("spectrum_after", 0) or 0) == int(pp.get("spectrum_on_ble", 0) or 0),
+            # 频谱帧同样不再按页门控：停在 BLE 页时仍在推（浮层/频谱页共用一份数据）
+            "spectrum_gating": int(pp.get("spectrum_after", 0) or 0)
+            > int(pp.get("spectrum_on_ble", 0) or 0),
             "waterfall_render": bool((report.get("waterfall_render") or {}).get("open"))
             and len(str((report.get("waterfall_render") or {}).get("files", ""))) > 10,
             # 英文界面零中文（只放行「中文(CN)」切换按钮）+ en 词典不缺 key
