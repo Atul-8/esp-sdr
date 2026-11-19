@@ -237,7 +237,8 @@ window.Pages.ble = (function () {
       minAdv: Math.round(ev.min_adv_frames || 0),
       frames: Math.round(ev.frames || 0),
       span: Number(ev.span_s || 0).toFixed(1),
-      wifi: (ev.wifi_busy || []).join("/") || "-",
+      wifi: busyText(ev.wifi_busy || []),
+      wifiMore: (ev.wifi_busy || []).length > 4 ? T("ble.verdict.more", { n: (ev.wifi_busy || []).length - 4 }) : "",
       risk: payload.risk_type || "—",
     };
     box.dataset.level = level;
@@ -245,6 +246,12 @@ window.Pages.ble = (function () {
     setText("#ble-verdict-head", T("ble.verdict." + code + ".head", nums));
     setText("#ble-verdict-why", T("ble.verdict." + code + ".why", nums));
     setText("#ble-verdict-next", T("ble.verdict." + code + ".next", nums));
+  }
+
+  /** 在用的信道最多列 4 个，其余用「等 N 个」收尾——13 个名字全列出来那句话就没法读了。 */
+  function busyText(channels) {
+    if (!channels.length) return "-";
+    return channels.slice(0, 4).join("/");
   }
 
   function setText(sel, text) {
