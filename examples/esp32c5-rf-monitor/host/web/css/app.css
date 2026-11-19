@@ -279,6 +279,22 @@ pre.raw { margin: 0; font: 11px/1.45 var(--mono); color: var(--fg); white-space:
 .big-risk[data-risk="light"] { color: var(--warn); }
 .big-risk[data-risk="heavy"] { color: var(--err); }
 .big-risk[data-risk="flat"] { color: #c4b5fd; }
+/* 一句话结论条：三行 = 结论 / 凭什么 / 接下来做什么 */
+.verdict { border: 1px solid #24405c; background: #0f1a28; border-radius: 10px; padding: 10px 12px; margin-bottom: 10px; }
+.verdict__head { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.verdict__tag { font: 700 11px/1.4 var(--mono); padding: 2px 8px; border-radius: 999px; background: #1b2b3d; color: #9fb3cc; }
+.verdict__head-text { font: 700 16px/1.4 var(--mono); color: #dbe6f5; }
+.verdict__why { margin-top: 6px; font: 12px/1.6 var(--mono); color: #a9bcd4; }
+.verdict__next { margin-top: 4px; font: 12px/1.6 var(--mono); color: #8fa6c2; }
+.verdict[data-level="risk"] { border-color: #7f2f3f; background: #1e1116; }
+.verdict[data-level="risk"] .verdict__tag { background: #43202b; color: #ffb3c1; }
+.verdict[data-level="risk"] .verdict__head-text { color: #ffd0d8; }
+.verdict[data-level="watch"] { border-color: #6b5a2c; background: #1f1b0f; }
+.verdict[data-level="watch"] .verdict__tag { background: #3b3320; color: #fcd34d; }
+.verdict[data-level="watch"] .verdict__head-text { color: #fde68a; }
+.verdict[data-level="clear"] { border-color: #1f5a44; background: #0f1d17; }
+.verdict[data-level="clear"] .verdict__tag { background: #16402f; color: #86efac; }
+.verdict[data-level="clear"] .verdict__head-text { color: #bbf7d0; }
 .warn-box { border: 1px solid #6b5a2c; background: #241f0e; color: #fcd34d; border-radius: 8px; padding: 7px 10px; font: 12px/1.5 var(--mono); margin-bottom: 10px; }
 
 /* ── 响应式：窗口态 / 最大化 / 拖小 都不许把按钮挤出可视区 ─────────────

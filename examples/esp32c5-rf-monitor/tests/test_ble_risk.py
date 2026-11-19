@@ -22,6 +22,7 @@ from modes.ble_risk import (
     DEGENERATE_MAX_CODE,
     DWELL_MS,
     LIGHT_RATIO,
+    MIN_ADV_FRAMES,
     PRESENCE_DB,
     PROMINENCE_DB,
     RISK_BLE,
@@ -30,10 +31,13 @@ from modes.ble_risk import (
     RISK_LIGHT,
     RISK_MIXED,
     RISK_NONE,
+    RISK_NO_DATA,
     RISK_WIFI,
     SCAN_BW_HZ,
     SCAN_STEP_HZ,
     WIDEBAND_FRAC,
+    VERDICT_CODE,
+    VERDICT_LEVEL,
     BleRisk,
     data_slots,
     level_of,
@@ -435,6 +439,53 @@ class PayloadTest(unittest.TestCase):
         self.assertEqual(summary["slice_weight"], 1.0)
         self.assertIn("risk_type", summary)
         self.assertGreater(summary["frames"], 0)
+
+
+class VerdictTest(unittest.TestCase):
+    """一句话结论：页面上「到底有没有风险」这句话，必须与判词同源、不能各说各的。"""
+
+    def test_mapping_covers_every_risk_word(self):
+        """枚举词护栏：新增判词就必须同时给结论档位，否则页面退回 nodata（等于哑掉）。"""
+        for word in (RISK_NONE, RISK_WIFI, RISK_BLE, RISK_MIXED, RISK_FLAT,
+                     RISK_LIGHT, RISK_COMPLEX, RISK_NO_DATA):
+            self.assertIn(word, VERDICT_CODE, f"判词 {word} 缺结论档位")
+            self.assertIn(VERDICT_CODE[word], VERDICT_LEVEL, f"{word} 的档位不在 VERDICT_LEVEL")
+
+    def test_code_matches_risk_type(self):
+        """真跑场景：verdict.code 必须等于 VERDICT_CODE[risk_type]，且 level 对得上。"""
+        for scenario in ("quiet", "ble_crowded", "wifi_busy", "mixed"):
+            plugin = run_scenario(scenario)
+            payload = plugin.web_payload()
+            verdict = payload["verdict"]
+            self.assertEqual(verdict["risk_type"], payload["risk_type"])
+            self.assertEqual(verdict["code"], VERDICT_CODE[payload["risk_type"]], scenario)
+            self.assertEqual(verdict["level"], VERDICT_LEVEL[verdict["code"]], scenario)
+
+    def test_why_carries_numbers_and_thresholds(self):
+        """模板要填的数字全在 why 里：值 + 门槛成对出现，页面不自己算判据。"""
+        verdict = run_scenario("wifi_busy").web_payload()["verdict"]
+        why = verdict["why"]
+        for key in ("adv_activity", "wideband", "contrast_db", "shallow", "slots",
+                    "slots_total", "adv_thr", "wideband_frac", "contrast_thr",
+                    "light_ratio", "min_adv_frames", "wifi_busy"):
+            self.assertIn(key, why, f"verdict.why 缺 {key}")
+        self.assertGreaterEqual(why["wideband"], 0.0)
+        self.assertLessEqual(why["wideband"], 1.0)
+        # 门槛必须就是模块自己的常量（页面写死数字就断了这条链）
+        self.assertEqual(why["wideband_frac"], WIDEBAND_FRAC)
+        self.assertEqual(why["contrast_thr"], CONTRAST_DB)
+        self.assertEqual(why["min_adv_frames"], float(MIN_ADV_FRAMES))
+
+    def test_no_data_before_frames(self):
+        verdict = BleRisk().web_payload()["verdict"]
+        self.assertEqual(verdict["code"], "nodata")
+        self.assertEqual(verdict["level"], "nodata")
+
+    def test_quiet_is_clear_not_watch(self):
+        """安静场景必须说「没证据」而不是「有抬升」——分不清和没问题不能混。"""
+        verdict = run_scenario("quiet").web_payload()["verdict"]
+        self.assertEqual(verdict["code"], "clear")
+        self.assertEqual(verdict["level"], "clear")
 
 
 class CoexistTest(unittest.TestCase):

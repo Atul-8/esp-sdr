@@ -66,6 +66,9 @@ window.Pages.ble = (function () {
     warn.hidden = !text;
     warn.textContent = text ? T("ble.warn.title") + "：" + text : "";
 
+    // ---- 一句话结论（第一屏就要回答「到底有没有风险」）----
+    renderVerdict(payload);
+
     // ---- 卡片 ----
     const risk = root.querySelector("#risk-type");
     risk.textContent = payload.risk_type || "—";
@@ -197,6 +200,58 @@ window.Pages.ble = (function () {
     fillList(root.querySelector("#ble-notes"), notes.length ? notes : [T("ble.sub")]);
   }
 
+  /** 结论档位 → 一行字。文案在 i18n.js（中英各一套），数字全从 payload.verdict.why 取。 */
+  const VERDICT_TAG = {
+    risk: "ble.verdict.tag.risk",
+    watch: "ble.verdict.tag.watch",
+    clear: "ble.verdict.tag.clear",
+    nodata: "ble.verdict.tag.nodata",
+  };
+  // 结论档位的文案键（后端 verdict.code 只能取这几个；不认识就退回 nodata，绝不显示空白）
+  const VERDICT_CODES = ["clear", "light", "complex", "flat", "ble", "wifi", "mixed", "nodata"];
+
+  function renderVerdict(payload) {
+    const box = root && root.querySelector("#ble-verdict");
+    if (!box) return;
+    const v = payload.verdict || {};
+    const ev = v.why || payload.evidence || {};
+    const level = VERDICT_TAG[v.level] ? v.level : "nodata";
+    const code = VERDICT_CODES.indexOf(v.code) >= 0 ? v.code : "nodata";
+    const nums = {
+      adv: U.fmtPct(ev.adv_activity || 0, 0),
+      advThr: U.fmtPct(ev.adv_thr || 0, 0),
+      advHeavy: U.fmtPct(ev.adv_heavy || 0, 0),
+      wide: U.fmtPct(ev.wideband || 0, 0),
+      wideThr: U.fmtPct(ev.wideband_frac || 0, 0),
+      wideDb: (ev.wideband_excess_db || 0).toFixed(0),
+      contrast: Number(ev.contrast_db || 0).toFixed(1),
+      contrastThr: Number(ev.contrast_thr || 0).toFixed(0),
+      prom: Number(ev.prominence_db || 0).toFixed(0),
+      promThr: Number(ev.prominence_thr || 0).toFixed(0),
+      shallow: U.fmtPct(ev.shallow || 0, 0),
+      lightThr: U.fmtPct(ev.light_ratio || 0, 0),
+      slots: Number(ev.slots || 0).toFixed(1),
+      slotsTotal: ev.slots_total || 0,
+      persistent: Math.round(ev.slots_persistent || 0),
+      ref: Number(ev.ref_db || 0).toFixed(0),
+      minAdv: Math.round(ev.min_adv_frames || 0),
+      frames: Math.round(ev.frames || 0),
+      span: Number(ev.span_s || 0).toFixed(1),
+      wifi: (ev.wifi_busy || []).join("/") || "-",
+      risk: payload.risk_type || "—",
+    };
+    box.dataset.level = level;
+    setText("#ble-verdict-tag", T(VERDICT_TAG[level]));
+    setText("#ble-verdict-head", T("ble.verdict." + code + ".head", nums));
+    setText("#ble-verdict-why", T("ble.verdict." + code + ".why", nums));
+    setText("#ble-verdict-next", T("ble.verdict." + code + ".next", nums));
+  }
+
+  function setText(sel, text) {
+    const el = root && root.querySelector(sel);
+    if (el) el.textContent = text;
+  }
+
   function fillList(box, items) {
     box.innerHTML = "";
     if (!items.length) {
@@ -220,6 +275,7 @@ window.Pages.ble = (function () {
     onTables,
     onLang,
     probe: () => ({
+      verdict: lastPayload && lastPayload.verdict ? lastPayload.verdict.level + ":" + lastPayload.verdict.code : null,
       bars3d: !!(bars3d && bars3d.ok),
       frames: bars3d ? bars3d.frames : 0,
       risk: lastPayload ? lastPayload.risk_type : null,

@@ -774,6 +774,13 @@ def build_app(argv: list[str]) -> tuple[QApplication, QWebEngineView, HostWindow
     parser.add_argument("--real", action="store_true", help="--selftest 时对着真板跑（默认假固件）")
     parser.add_argument("--seconds", type=float, default=6.0, help="--selftest 跑多久")
     parser.add_argument("--shot", default="", help="--selftest 截图保存路径")
+    parser.add_argument("--soak-page", default="", help="--soak 时自动切到这一页（spectrum/waterfall/wifi/ble/capture/raw）")
+    parser.add_argument(
+        "--soak",
+        type=float,
+        default=0.0,
+        help="浸泡测试：自动开始采集，每 2s 打印一次实时频谱/瀑布页探针，跑满 N 秒后退出（查「跑一会儿卡住」用）",
+    )
     parser.add_argument("--window-size", default="1440x900", help="窗口尺寸 WxH")
     parser.add_argument("--lang", default="zh", choices=list(LANGS), help="界面默认语言（网页里还能切，切换后记在 localStorage）")
     parser.add_argument(
@@ -980,6 +987,10 @@ def run_selftest(app: QApplication, view: QWebEngineView, window: HostWindow, ar
             hints: document.querySelectorAll('#ble-hints li').length,
             notes: document.querySelectorAll('#ble-notes li').length,
             warn: ((document.querySelector('#ble-warn')||{}).textContent||'').length,
+            verdict: ((document.querySelector('#ble-verdict-head')||{}).textContent||''),
+            verdictWhy: ((document.querySelector('#ble-verdict-why')||{}).textContent||''),
+            verdictNext: ((document.querySelector('#ble-verdict-next')||{}).textContent||''),
+            verdictLevel: ((document.querySelector('#ble-verdict')||{}).dataset||{}).level || '',
             probe: (window.Pages.ble.probe ? Pages.ble.probe() : null)
         })""",
         "waterfall": """JSON.stringify({
@@ -1143,6 +1154,15 @@ def run_selftest(app: QApplication, view: QWebEngineView, window: HostWindow, ar
             "ble_hints": int(ble_page.get("hints", 0) or 0) >= 1,
             "ble_notes": int(ble_page.get("notes", 0) or 0) >= 3,
             "ble_bars3d": bool((ble_page.get("probe") or {}).get("bars3d")),
+            # 一句话结论：必须是**有内容的判断句**（不是 "—"），且档位合法、三行都填了
+            "ble_verdict": (
+                len(str(ble_page.get("verdict", "")).strip()) >= 8
+                and str(ble_page.get("verdict", "")).strip() != "-"
+                and len(str(ble_page.get("verdictWhy", "")).strip()) >= 12
+                and len(str(ble_page.get("verdictNext", "")).strip()) >= 8
+                and str(ble_page.get("verdictLevel", "")) in ("risk", "watch", "clear", "nodata")
+                and bool((ble_page.get("probe") or {}).get("verdict"))
+            ),
             # 抓拍页：门槛表真的从模块下发、过滤计数真的在渲染、边界声明不空
             "capture_page": (
                 int(cap_page.get("rows", 0) or 0) >= 1
@@ -1758,6 +1778,55 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.selftest:
         return run_selftest(app, view, window, args)
+
+    if args.soak:
+        def soak_start() -> None:
+            if not window.page_loaded:
+                QTimer.singleShot(300, soak_start)
+                return
+            result = window.start_run(
+                to_json(
+                    {
+                        "port": args.port,
+                        "mock": bool(args.mock),
+                        "scenario": args.scenario,
+                        "gain_index": args.gain_index,
+                        "gain_mode": args.gain_mode,
+                        "gain_target": args.gain_target,
+                        "bins_out": 256,
+                        "lang": args.lang,
+                        "engine": args.engine,
+                    }
+                )
+            )
+            print(f"[soak] start: {result.get('message')}", flush=True)
+            if args.soak_page:
+                view.page().runJavaScript(f"Router.navigate('{args.soak_page}')", 0)
+            QTimer.singleShot(2500, soak_tick)
+
+        soak_began = {"t": time.time()}
+
+        def soak_tick() -> None:
+            elapsed = round(time.time() - soak_began["t"], 1)
+            view.page().runJavaScript(
+                "JSON.stringify({"
+                "page:(window.Router&&Router.current)?Router.current.id:null,"
+                "spec:(window.Pages&&Pages.spectrum&&Pages.spectrum.probe)?Pages.spectrum.probe():null,"
+                "wf:(window.Pages&&Pages.waterfall&&Pages.waterfall.probe)?Pages.waterfall.probe():null"
+                "})",
+                0,
+                lambda res: print(f"[soak] t={elapsed}s {res}", flush=True),
+            )
+            if elapsed < args.soak:
+                QTimer.singleShot(2000, soak_tick)
+            else:
+                print(f"[soak] done after {elapsed}s", flush=True)
+                app.quit()
+
+        QTimer.singleShot(300, soak_start)
+        app.aboutToQuit.connect(window.shutdown)
+        app.exec()
+        return 0
 
     if args.autostart or args.mock:
         def autostart() -> None:

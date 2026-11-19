@@ -118,6 +118,31 @@ RISK_LIGHT = "轻微干扰"
 #: 多类证据同时成立（宽带 + 栅格占用 + 浅抬升…）⇒ 复杂噪音，不给单一归因
 RISK_COMPLEX = "复杂噪音（多源混合）"
 
+#: 判词 → 一句话结论的**档位**：risk = 有风险 / watch = 有抬升但不够判 / clear = 没证据 / nodata
+#: 档位同时是前端文案的键后缀（``ble.verdict.<code>.head/why/next``），
+#: 这样「结论」跟「判词」不可能互相矛盾——两者都出自同一次 ``risk_type()``。
+VERDICT_CODE = {
+    RISK_NONE: "clear",
+    RISK_LIGHT: "light",
+    RISK_COMPLEX: "complex",
+    RISK_FLAT: "flat",
+    RISK_BLE: "ble",
+    RISK_WIFI: "wifi",
+    RISK_MIXED: "mixed",
+    RISK_NO_DATA: "nodata",
+}
+#: 哪些判词算「有风险」：给「不确定」的两档留出位置，别把分不清的说成安全
+VERDICT_LEVEL = {
+    "clear": "clear",
+    "light": "watch",
+    "complex": "risk",
+    "flat": "watch",
+    "ble": "risk",
+    "wifi": "risk",
+    "mixed": "risk",
+    "nodata": "nodata",
+}
+
 
 # ---------------------------------------------------------------------------
 # 小工具
@@ -634,6 +659,50 @@ class BleRisk(ModePlugin):
     def level(self) -> str:
         return level_of(self.score())
 
+    def verdict(self) -> dict[str, Any]:
+        """一句话结论：**先回答「到底有没有风险」，再说凭什么。**
+
+        用户看到的第一个问题永远是「所以有没有风险？」——原来页面只给判词标签 + 十几列
+        数字，得自己拼判据才能回答，实测被评价「完全没讲明白」。这里把三件事结构化下发给
+        页面：
+
+        * ``code``  结论档位（``clear/light/complex/flat/ble/wifi/mixed/nodata``），
+          页面据此选模板（文案在 ``i18n.js``，中英各一套）；
+        * ``level`` ``risk`` / ``watch`` / ``clear`` / ``nodata``，页面据此上色；
+        * ``why``   模板里要填的数字**全部来自这里**：页面不自己算判据，也不写死门槛。
+
+        ``code`` 与 ``risk_type()`` 由同一张映射表绑定 → 结论与判词不可能自相矛盾。
+        """
+        risk = self.risk_type()
+        code = VERDICT_CODE.get(risk, "nodata")
+        ev = self.evidence()
+        prom = max((stat.prominence_db for stat in self.adv.values()), default=0.0)
+        return {
+            "code": code,
+            "level": VERDICT_LEVEL.get(code, "nodata"),
+            "risk_type": risk,
+            "why": {
+                **ev,
+                "prominence_db": round(prom, 1),
+                "ref_db": round(self.ref_db, 1),
+                "presence_db": PRESENCE_DB,
+                "prominence_thr": PROMINENCE_DB,
+                "adv_thr": 0.10,
+                "adv_heavy": 0.15,
+                "wideband_frac": WIDEBAND_FRAC,
+                "wideband_excess_db": WIDEBAND_EXCESS_DB,
+                "contrast_db": round(self.contrast(), 1),
+                "contrast_thr": CONTRAST_DB,
+                "light_ratio": LIGHT_RATIO,
+                "min_adv_frames": float(MIN_ADV_FRAMES),
+                "headroom_codes": HEADROOM_CODES,
+                "slots_total": len(data_slots()),
+                "wifi_busy": self.wifi_busy(),
+                "frames": self.frames,
+                "span_s": round(self.span_s, 1),
+            },
+        }
+
     def wifi_busy(self) -> list[int]:
         """「在用」的 2.4G WiFi 信道：18 MHz 窗口里 ≥50% 的 bin 高于本帧 p10+8 dB。"""
         return [item["channel"] for item in self.wifi_channels() if item["busy"]]
@@ -776,6 +845,8 @@ class BleRisk(ModePlugin):
         ref = self.ref_db
         return {
             "kind": "ble_risk",
+            # 一句话结论（页面第一屏就显示它，别让人自己去拼判据）
+            "verdict": self.verdict(),
             "risk_type": self.risk_type(),
             "score": self.score(),
             "level": self.level(),

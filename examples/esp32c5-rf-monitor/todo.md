@@ -667,6 +667,64 @@ epo\examples\esp32c5-rf-monitor`；`ESPSDR_SRC=/tmp` 正确抛错 |
 
 ---
 
+## [REVIEW] 7.3 真板三处「跑起来不对」的修复（feat/7-fsm）
+
+人类真板实测报了三条：「实时频谱页卡在等待扫频进度」「周期瀑布页丢 5G HIGH 频段」
+「BLE 风险评估完全没讲明白」。三条都是**真板 + 单射频分时**才会暴露的问题，
+假固件全绿也照样出。逐条定位与修法如下。
+
+### 7.3.1 实时频谱卡在「等待扫频进度」
+
+- **现象**：进频谱页后顶部扫频条一直不动，频谱曲线也不刷新。
+- **根因**：首屏 `Router.navigate()` 早于 `Bridge.init()`，`navigate()` 里的
+  `setView()` 被 `if (window.Bridge && Bridge.ready())` 挡掉 ⇒ 主机侧
+  `wanted_pages()` 收不到 `spectrum` ⇒ `wants_spectrum()` 为假 ⇒ 频谱帧从不下发。
+  页面什么错都不报，只是「等」。
+- **修法**：`router.js` 把上报抽成 `reportView()` 并导出；`app.js` 在
+  `Bridge.init()` 就绪回调里补报一次（补发，不是取消门控）。
+- **验证**：`--soak 40`；`frames` 从 43 稳定涨到 599、`passes` 只在真回卷时 +1。
+
+### 7.3.2 周期瀑布丢 5G HIGH
+
+一页里五个模块各自扫自己的计划，原本四处假设都只对「单模块独占射频」成立：
+
+| # | 根因 | 修法 |
+|---|------|------|
+| A | 瀑布收下了**别的模块**的窗（频点回卷≠换轮） | `modes/waterfall.py` 建 `_plan_index`（按固件整 MHz 口径），`on_snapshot()` 只收自己的 44 个窗 |
+| B | 帧里没有「这帧属于谁」 | host 层 `tag_module()` 包 `plugin.on_snapshot`，`snap.meta["module"] = plugin.id`（`core/` 不动） |
+| C | 前端扫频条被别的模块的帧推着走 | `scanbar.js` `update()` 先比 `payload.module`，不同模块直接 return |
+| D | 扫到一半的当前轮也被画成一行 ⇒ 排在最后的 5G HIGH 永远是空 | `web_payload()` 只画扫满轮次；全不满才退回画当前轮，并上报 `pending_windows`，页面写「当前轮已扫 n/44 窗」 |
+| E | 一窗 ~60 帧全部落库，采集时间片 134 ms → 526 ms | 新增 `host/store_throttle.py` `WindowStore`：同窗最大保持合并、换窗或 `max_hold_s=1.0` 才落盘 |
+| F | 用户看不出「为什么这行是空的」 | 页面显示「当前轮已扫 n/44 窗（扫满才画成一行）」 |
+
+- **验证**（真板 `probe_wf.py 62`）：三个频段 `nonzero` 全部 **180/180 = 100%**，
+  `last_row_nonzero` 也 180（修前 5G HIGH 是 240/66.7%、最后一行只有 60）。
+  `--soak 95 --soak-page waterfall`：`rows 1 → 2`、`painted 100`、`frames` 连续涨。
+- **边界**：五模块分时下一轮约 35 s，所以「行数」长得慢是设计使然，不是丢数据；
+  只画满轮 = 宁可行少也不画错。
+
+### 7.3.3 BLE 页「看不出到底有没有风险」
+
+- **现象**：页面给判词标签 + 十几列数字，得自己拼判据才能回答「所以有没有风险」。
+- **修法**：`modes/ble_risk.py` 新增 `verdict()`，把结论结构化下发：
+  `code`（`clear/light/complex/flat/ble/wifi/mixed/nodata`）、
+  `level`（`risk/watch/clear/nodata`，页面据此上色）、
+  `why`（模板要填的数字全在这里，页面不自己算判据、不写死门槛）。
+  `code` 与 `risk_type()` 由同一张 `VERDICT_CODE` 映射表绑定 ⇒ **结论与判词不可能互相矛盾**。
+  页面新增结论条三行：**结论 / 凭什么 / 接下来做什么**；文案在 `i18n.js`，中英各一套，英文零中文。
+- **验证**：自检新增 `ble_verdict` 检查（结论句非空、档位合法、三行都填），真板 **53/53 全绿**；
+  mock 十个场景逐个过一遍，结论档位与判词一致（`quiet→clear`、`ble_crowded→ble`、
+  `wifi_busy/wifi_suppress_ble/microwave→wifi`、`mixed→mixed`、`unknown_cw*→complex`）。
+- **边界**：结论只到「有没有风险 / 是哪一类」，不做设备级归因（要归因得抓包）。
+
+### 回归
+
+- 全量 `python -m unittest discover -s tests -t .` **280 OK**；
+- `host/tests/test_session.py` 29 OK、`test_l10n.py` 24 OK、`test_link_guard.py` 6 OK、
+  `test_sweep_session.py` 9 OK；
+- 真板 `--selftest --real --port COM56 --seconds 12` **53/53 全绿**（含 `en_no_cjk` 6 页 0 条、缺 key 0）；
+- `python testing/chk_l10n.py` 残留 0 / 骨架 0 / 缺条目 0 / 占位不符 0。
+
 ## 阻塞与需求
 
 - **应用侧健壮性缺口**（真机实测暴露，属 `core/scheduler.py`）：一次扫描失败会把链路
