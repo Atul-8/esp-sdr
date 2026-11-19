@@ -117,6 +117,10 @@ window.ScanBar = (function () {
     /** payload 来自 spectrum 信号（有 center_hz / bw_hz / module） */
     update(payload) {
       if (!payload) return;
+      // 频谱帧是**所有**模块共用一路推下来的（单射频分时）；这张地图画的是 this.module
+      // 那条计划，别的模块的窗（wifi 2412 / 抓档 5180 / 守卫 5745 …）不能拿来在这张图上
+      // 找最近格——那样游标会来回跳、「第 N 轮」也会被假回卷刷高（真板实测 8s 就吹到 12 轮）。
+      if (this.module && payload.module && payload.module !== this.module) return;
       this.curWidth = payload.bw_hz;
       if (!this.plan.length) {
         this.lastCenter = payload.center_hz;
@@ -175,8 +179,19 @@ window.ScanBar = (function () {
 
     // ---- 动画 -------------------------------------------------------------
     start() {
-      if (this.raf) return;
+      // 注意：**不能**只判 ``this.raf`` 就 return。requestAnimationFrame 在窗口被遮挡 /
+      // 最小化时会被节流甚至完全不回调，这时 raf 句柄还是非零、动画却已经停了，
+      // 后面每一帧都被这里挡回去 → 游标永久冻在某个位置（真板实测冻在 229px）。
+      // 判据改成「一段时间内没推进就重开一条」。
+      const now = typeof performance !== "undefined" ? performance.now() : Date.now();
+      if (this.raf) {
+        if (now - (this.lastStepAt || 0) < 300) return;
+        cancelAnimationFrame(this.raf);
+        this.raf = 0;
+      }
+      this.lastStepAt = now;
       const step = () => {
+        this.lastStepAt = typeof performance !== "undefined" ? performance.now() : Date.now();
         const k = this.wrapping ? LERP_WRAP : LERP;
         this.x += (this.target - this.x) * k;
         if (Math.abs(this.target - this.x) < 0.4) {

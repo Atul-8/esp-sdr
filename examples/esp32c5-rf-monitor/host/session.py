@@ -334,6 +334,9 @@ class HostSession:
             target=config.gain_target if config.gain_target is not None else 4.0,
             mock=config.mock,
         )
+        # 给每个模块下行的帧打上模块 id（前端靠它把帧对回自己那条扫描计划）
+        for plugin in self.registry.plugins:
+            plugin.on_snapshot = tag_module(plugin)
         # 初始档位**建控制器时**就落地：真链路等第一次 scan 才设的话，前几帧都是 AGC 值
         if not config.mock:
             # 先问固件要真实的档位范围（实板 0..81，兜底写死 90 会给出无效档）
@@ -342,11 +345,15 @@ class HostSession:
             except Exception:  # noqa: BLE001 - 老固件不认 GAIN? 就用兜底范围
                 pass
             self.gain.apply(self.link)
+        # 留档库包一层节流：一条一提交会把采集时间片从 134 ms 拖到 526 ms
+        # （真板实测，见 host/store_throttle.py 抬头注释），瀑布图就只剩两行可画
         self.store = None
         if config.store_path:
             from core.store import Store
 
-            self.store = Store(config.store_path)
+            from host.store_throttle import WindowStore
+
+            self.store = WindowStore(Store(config.store_path))
         self.last_run_stats = None
         # 采集引擎：默认主机逐窗；engine=device 且设备会自扫时换成订阅模式（见 core/sweep_source.py）
         self.sweep: Any = None
@@ -460,6 +467,13 @@ class HostSession:
             except Exception:  # noqa: BLE001
                 pass
         if self.store is not None:
+            # 收尾先把节流里攒着的那一条写进库，再关连接（否则最后一个窗白采）
+            flush = getattr(self.store, "flush", None)
+            if callable(flush):
+                try:
+                    flush()
+                except Exception:  # noqa: BLE001
+                    pass
             try:
                 self.store.close()
             except Exception:  # noqa: BLE001
@@ -611,6 +625,16 @@ class HostSession:
             "plugins": plugins,
         })
 
+    def _store_state(self) -> dict[str, Any]:
+        """留档库计数（没开库就返回空，界面就不会多显示一块）。"""
+        state = getattr(self.store, "state", None)
+        if not callable(state):
+            return {}
+        try:
+            return dict(state())
+        except Exception:  # noqa: BLE001 - 统计不上报不该影响采集
+            return {}
+
     @staticmethod
     def table_json(output: Output | None) -> dict[str, Any] | None:
         if output is None:
@@ -637,6 +661,8 @@ class HostSession:
             "uptime_s": round(time.time() - self.started_at, 1),
             # 增益读数跟着每秒的统计一起推：前端不用额外轮询，也不会算出「改了但没生效」
             "gain": self.gain.state(),
+            # 留档库的「收帧数 / 落库条数」：一窗多帧合并成一条，两个数对不上是正常的
+            **({"store": state} if (state := self._store_state()) else {}),
             **stats.as_dict(),
         })
 
@@ -841,6 +867,33 @@ def _cell(value: Any) -> Any:
     if isinstance(value, (int, float, str, bool)) or value is None:
         return value
     return str(value)
+
+
+def tag_module(plugin: Any) -> Any:
+    """把插件包一层：喂给它的每一帧都在 ``meta["module"]`` 上打出模块 id。
+
+    为什么需要：单射频是**分时**的，同一串帧流里混着 5 个模块的窗。前端要区分
+    「这一帧是哪个模块的窗」（扫频进度条只能跟自己那条计划对齐，否则游标会被别家
+    的窗带着乱跳、「第 N 轮」被假回卷刷高）——而 ``core/`` 的帧解析里没有这个字段。
+
+    只包 host 层，``core/`` 一个字不动；打标时机由 ``core.scheduler._serve`` 保证：
+    它先调 ``plugin.on_snapshot(snap)`` 再调 ``on_snapshot`` 回调，所以这里打完标
+    之后的下行（``HostSession.spectrum``）一定读得到。
+    """
+    inner = plugin.on_snapshot
+    module_id = str(getattr(plugin, "id", "") or "")
+
+    def tagged(snap: Any) -> Any:
+        try:
+            meta = getattr(snap, "meta", None)
+            if isinstance(meta, dict) and module_id:
+                meta["module"] = module_id
+        except Exception:  # noqa: BLE001 - 打标失败不该影响分析
+            pass
+        return inner(snap)
+
+    tagged.__name__ = "tagged_on_snapshot"
+    return tagged
 
 
 def to_json(payload: Any) -> str:

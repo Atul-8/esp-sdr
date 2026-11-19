@@ -350,6 +350,15 @@ window.Pages.waterfall = (function () {
     });
     setText("#wf-sweep-note", wall > 0 ? note + " · " + T("wf.card.sweepWall", { wall: wall.toFixed(1) }) : note);
     setText("#wf-sweeps", String(payload.sweeps || 0));
+    // 「当前这一轮扫到哪了」：扫满才画成一行，所以这里要单独说进度，
+    // 否则用户只能看到「已扫 2 轮」而图上只有 2 行，以为丢了数据
+    const pending = Number(payload.pending_windows) || 0;
+    setText(
+      "#wf-sweeps-note",
+      pending > 0
+        ? T("wf.card.sweepsPending", { done: pending, total: payload.windows || 0 })
+        : T("wf.card.sweepsNote")
+    );
     setText("#wf-windows", String(payload.windows || 0));
     setText("#wf-window-note", T("wf.card.windowsNote", {
       bw: payload.bw_mhz || 0,
@@ -377,6 +386,11 @@ window.Pages.waterfall = (function () {
     const cover = (last.cover || []).map((c) => c.label + " " + c.windows + " " + T("wf.notes.window")).join(" / ");
     const lines = [
       T("wf.notes.rows", { rows: last.rows || 0, sweeps: last.sweeps || 0 }),
+      // 一轮扫满才落一行：把「当前这轮已经扫了多少窗」说清楚，别让人以为 5G HIGH 丢了
+      T("wf.notes.pending", {
+        done: Number(last.pending_windows) || 0,
+        total: last.windows || 0,
+      }),
       T("wf.notes.cover", { cover: cover }),
       T("wf.notes.code", { lo: Math.round(last.code_lo || 0), hi: Math.round(last.code_hi || 0) }),
       T("wf.notes.png"),

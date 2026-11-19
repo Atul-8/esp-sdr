@@ -224,13 +224,15 @@ class WebPayloadTest(unittest.TestCase):
                     bins_db=(level,) * BINS,
                 )
             )
+        # 换到下一格：必须用**计划里的窗**（12.7 MHz 均分出来的 2422.7 MHz）。
+        # 计划外的频点现在会被丢掉——单射频分时，别的模块的窗不能插进这张图。
         monitor.on_snapshot(
-            Snapshot(ts=1_010.0, center_hz=2_450 * MB, bw_hz=SWEEP_BW_HZ, bins_db=(20,) * BINS)
+            Snapshot(ts=1_010.0, center_hz=2_422_700_000, bw_hz=SWEEP_BW_HZ, bins_db=(20,) * BINS)
         )
         self.assertEqual(monitor.frames, 4, "frames 仍然数真帧，不能因为合并漏计")
         self.assertEqual(len(monitor._ring), 2, "同窗连帧要合并成一条")
         self.assertEqual(max(monitor._ring[0].bins_db), 55, "合并取最大保持（与热力图口径一致）")
-        self.assertEqual(monitor._ring[1].center_hz, 2_450 * MB, "换窗要新起一条")
+        self.assertEqual(monitor._ring[1].center_hz, 2_422_700_000, "换窗要新起一条")
 
     def test_row_period_needs_two_complete_sweeps(self) -> None:
         """只有一轮是扫满的，就别硬算周期（真板截断残轮会把周期算小到 1.8 s）。"""

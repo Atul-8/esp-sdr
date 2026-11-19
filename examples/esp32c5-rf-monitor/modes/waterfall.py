@@ -134,7 +134,17 @@ class WaterfallMonitor(ModePlugin):
         self.first_ts: float | None = None
         self.last_ts: float | None = None
         self._windows = 0
+        #: 本模块自己的窗（按固件口径取整到 MHz）→ 计划里的窗序号。
+        #: 单射频是**分时**扫的：上位机里 wifi_check / capture / guard 的窗也会流到这里，
+        #: 若照单全收，环形缓冲会被别人的窗插花，``group_sweeps()`` 的「频点回卷 = 换轮」
+        #: 假设就不成立（实测真板：48 行只能拼出 2 行，5G HIGH 那一段永远是空的）。
+        self._plan_index: dict[int, int] = {}
+        plan_index = 0
         for _band, centers in sweep_plan():
+            for center in centers:
+                # 固件 ``FREQ`` 只收整 MHz，回读的窗中心是取整后的值，这里按同一口径建表
+                self._plan_index.setdefault(int(round(center / 1e6)) * 1_000_000, plan_index)
+                plan_index += 1
             self._windows += len(centers)
 
     # ---- 契约 ------------------------------------------------------------
@@ -154,6 +164,9 @@ class WaterfallMonitor(ModePlugin):
         return requests
 
     def on_snapshot(self, snap: Snapshot) -> None:
+        # 只收**本模块计划里的窗**：别的模块的窗混进来会把「一轮」切碎（见 _plan_index 注释）
+        if int(round(snap.center_hz / 1e6)) * 1_000_000 not in self._plan_index:
+            return
         self.frames += 1
         if self.first_ts is None:
             self.first_ts = snap.ts
@@ -254,6 +267,18 @@ class WaterfallMonitor(ModePlugin):
         snaps = list(self._ring)
         sweeps = group_sweeps(snaps) if snaps else []
         rows = sweeps[-WEB_ROWS:]
+        # 顶端那一行常常是**扫到一半的当前轮**：窗是按频率顺序扫的，5G HIGH 排在最后，
+        # 于是「最新一行」里 5G HIGH 永远还没扫到 → 前端把这一行画出来就成了
+        # 「5G HIGH 一片空白、别的频段正常」，看着像频段丢了（真板实测用户就是这么报的）。
+        # 只画**扫满**的轮次；一轮都还没扫满时（刚开跑）才退回画当前轮，并把缺口如实标出来。
+        complete = [sweep for sweep in rows if len(sweep) >= self._windows]
+        pending = 0
+        if complete:
+            if rows and len(rows[-1]) < self._windows:
+                pending = len(rows[-1])
+            rows = complete[-WEB_ROWS:]
+        elif rows:
+            rows = rows[-1:]
         grids = {band.id: blank_grid(len(rows), WEB_COLS) for band in BANDS}
         cache: dict[Any, Any] = {}
         for index, sweep in enumerate(rows):
@@ -298,6 +323,9 @@ class WaterfallMonitor(ModePlugin):
             "t0": round(t0, 3),
             "row_ts": [round(sweep[0].ts - t0, 2) for sweep in rows],
             "row_frames": [len(sweep) for sweep in rows],
+            # 当前这轮已经扫了多少窗（还没扫满就画不成一行）；前端据此显示进度，不画空行
+            "pending_windows": pending,
+            "rows_complete": bool(complete),
             "bands": bands,
             "cover": self.band_summary(),
         }
